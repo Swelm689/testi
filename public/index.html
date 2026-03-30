@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 
 <head>
@@ -14,9 +14,43 @@
     <div class="app-layout">
         <!-- Header -->
         <header class="app-header">
-            <div class="logo">
-                <span class="logo-icon">🍌</span>
-                <span class="logo-text">Nano Banana</span>
+            <div class="profile-menu-wrap">
+                <button class="profile-btn" onclick="toggleProfileMenu()" id="profileBtn" title="Menu">
+                    <span class="profile-btn-avatar" id="profileBtnAvatar" style="display:none;"></span>
+                    <i data-lucide="user" id="profileBtnIcon"></i>
+                    <span class="profile-badge" id="profileBadge" style="display:none;"></span>
+                </button>
+                <div class="profile-dropdown" id="profileDropdown">
+                    <div class="profile-dropdown-account" id="accountMenuSummary" style="display:none;">
+                        <div class="profile-dropdown-avatar" id="accountMenuAvatar">N</div>
+                        <div class="profile-dropdown-meta">
+                            <span class="profile-dropdown-name" id="accountMenuName">Guest</span>
+                            <span class="profile-dropdown-email" id="accountMenuEmail"></span>
+                        </div>
+                    </div>
+                    <button class="profile-dropdown-item" onclick="openProfilePage(); toggleProfileMenu();" id="profileOpenDropdown">
+                        <i data-lucide="user"></i>
+                        <span id="profileMenuLabel">Profile</span>
+                    </button>
+                    <button class="profile-dropdown-item" onclick="switchAccountFromMenu(); toggleProfileMenu();" id="profileSwitchDropdown" style="display:none;">
+                        <i data-lucide="repeat-2"></i>
+                        <span id="profileSwitchLabel">Switch account</span>
+                    </button>
+                    <button class="profile-dropdown-item profile-dropdown-item-danger" onclick="signOutFromMenu(); toggleProfileMenu();" id="profileSignOutDropdown" style="display:none;">
+                        <i data-lucide="log-out"></i>
+                        <span id="profileMenuSignOutLabel">Sign out</span>
+                    </button>
+                    <div class="profile-dropdown-divider" id="profileDropdownDivider" aria-hidden="true" style="display:none;"></div>
+                    <button class="profile-dropdown-item" onclick="toggleNews(); toggleProfileMenu();" id="newsToggleDropdown">
+                        <i data-lucide="newspaper"></i>
+                        <span data-i18n="news_title">News</span>
+                        <span class="news-badge" id="newsBadge" style="display:none;">0</span>
+                    </button>
+                    <button class="profile-dropdown-item" onclick="toggleLangPicker(); toggleProfileMenu();">
+                        <i data-lucide="globe"></i>
+                        <span data-i18n="lang_title">Language</span>
+                    </button>
+                </div>
             </div>
             <nav class="mode-tabs">
                 <button class="tab active" onclick="switchMode('text')" id="mode-text">
@@ -28,9 +62,6 @@
                 <button class="tab" onclick="switchMode('video')" id="mode-video">
                     <i data-lucide="clapperboard"></i><span data-i18n="tab_video">Video</span>
                 </button>
-                <button class="tab" onclick="switchMode('kling3')" id="mode-kling3">
-                    <i data-lucide="zap"></i><span data-i18n="tab_kling3">Kling 3</span>
-                </button>
                 <button class="tab" onclick="switchMode('3d')" id="mode-3d">
                     <i data-lucide="box"></i><span data-i18n="tab_3d">3D</span>
                 </button>
@@ -41,9 +72,6 @@
             <button class="history-toggle" onclick="toggleHistory()" id="historyToggle">
                 <i data-lucide="clock"></i>
                 <span data-i18n="history_title">History</span>
-            </button>
-            <button class="lang-toggle" onclick="toggleLangPicker()" id="langToggle" title="Language">
-                <i data-lucide="globe"></i>
             </button>
         </header>
 
@@ -522,10 +550,39 @@
                             <button class="sub-tab" type="button" onclick="switchVideoTab('reference-to-video')" id="vtab-reference">
                                 <i data-lucide="layers"></i> <span data-i18n="vtab_ref">Ref</span>
                             </button>
+                            <button class="sub-tab" type="button" onclick="switchVideoTab('audio-to-video')" id="vtab-audio">
+                                <i data-lucide="music"></i> <span data-i18n="vtab_audio">Audio</span>
+                            </button>
                         </nav>
                     </div>
 
-                    <!-- Kling 3 Mode -->
+                    <div id="ltx23UploadGroup" class="section-block" style="display: none;">
+                        <nav class="sub-tabs" id="ltx23FamilyTabs">
+                            <button class="sub-tab active" type="button" onclick="switchLtx23Family('text-to-video')" id="ltx23family-text">
+                                <i data-lucide="type"></i> <span data-i18n="vtab_text">Text</span>
+                            </button>
+                            <button class="sub-tab" type="button" onclick="switchLtx23Family('image-to-video')" id="ltx23family-image">
+                                <i data-lucide="image"></i> <span data-i18n="vtab_image">Image</span>
+                            </button>
+                            <button class="sub-tab" type="button" onclick="switchLtx23Family('video-to-video')" id="ltx23family-video">
+                                <i data-lucide="film"></i> <span data-i18n="vtab_video">Video</span>
+                            </button>
+                            <button class="sub-tab" type="button" onclick="switchLtx23Family('audio-to-video')" id="ltx23family-audio">
+                                <i data-lucide="music"></i> <span data-i18n="vtab_audio">Audio</span>
+                            </button>
+                        </nav>
+
+                        <div class="settings-row" style="margin-top:0.75rem;">
+                            <div class="field" style="flex:2;">
+                                <label data-i18n="label_model">Model</label>
+                                <select id="ltx23Model"></select>
+                            </div>
+                        </div>
+
+                        <nav class="sub-tabs" id="ltx23VariantTabs" style="margin-top:0.4rem;"></nav>
+                    </div>
+
+                    <!-- Kling 3 controls are embedded into Video via public/app.js -->
                     <div id="kling3UploadGroup" class="section-block" style="display: none;">
                         <nav class="sub-tabs" id="kling3FamilyTabs">
                             <button class="sub-tab active" type="button" onclick="switchKling3Family('v3')" id="k3family-v3">
@@ -542,6 +599,9 @@
                             </button>
                             <button class="sub-tab" type="button" onclick="switchKling3Tab('v3-image-to-video')" id="k3tab-v3-image">
                                 <i data-lucide="image"></i> V3 Image
+                            </button>
+                            <button class="sub-tab" type="button" onclick="switchKling3Tab('v3-motion-control')" id="k3tab-v3-motion">
+                                <i data-lucide="person-standing"></i> V3 Motion
                             </button>
                         </nav>
 
@@ -673,6 +733,24 @@
                                         <option value="0.5" selected>0.5</option>
                                         <option value="0.6">0.6</option>
                                         <option value="0.7">0.7</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <!-- Motion Control Settings (V3 Motion models) -->
+                            <div class="settings-grid" style="margin-top:0.5rem; display:none;" id="kling3MotionSettings">
+                                <div class="field" id="kling3MotionOrientationGroup">
+                                    <label>Character Orientation</label>
+                                    <select id="kling3MotionOrientation">
+                                        <option value="video" selected>Video</option>
+                                        <option value="image">Image</option>
+                                    </select>
+                                </div>
+                                <div class="field" id="kling3KeepOriginalSoundGroup">
+                                    <label>Keep Original Sound</label>
+                                    <select id="kling3KeepOriginalSound">
+                                        <option value="true" selected>On</option>
+                                        <option value="false">Off</option>
                                     </select>
                                 </div>
                             </div>
@@ -841,6 +919,12 @@
                                     <p data-i18n="wiz_step_inspiration_desc">Pick a style preset or upload your own reference image to guide the design.</p>
                                 </div>
                                 <div class="wiz-inspo-section">
+                                    <div class="wiz-inspo-option">
+                                        <label class="wiz-inspo-option-label" for="toolsInspoMatchBg">
+                                            <input type="checkbox" id="toolsInspoMatchBg" />
+                                            <span data-i18n="wiz_inspo_match_bg">Keep background aligned with product style</span>
+                                        </label>
+                                    </div>
                                     <div class="wiz-inspo-presets" id="wizInspoPresets"></div>
                                     <input type="file" accept="image/*" id="wizInspoFileInput" style="display:none" />
                                 </div>
@@ -871,11 +955,7 @@
                                     <div class="settings-grid" style="margin-top:0.5rem;">
                                         <div class="field">
                                             <label data-i18n="wiz_lbl_model">Model</label>
-                                            <select id="toolsModel" onchange="wizUpdateToolsSettings()">
-                                                <option value="nano-banana-2/edit" selected>Nano Banana 2</option>
-                                                <option value="nano-banana-pro/edit">Nano Banana Pro</option>
-                                                <option value="gpt-image-1.5/edit">GPT-Image 1.5</option>
-                                            </select>
+                                            <select id="toolsModel" onchange="wizUpdateToolsSettings()"></select>
                                         </div>
                                         <div class="field" id="toolsFieldResolution">
                                             <label data-i18n="wiz_lbl_resolution">Resolution</label>
@@ -1128,17 +1208,94 @@
         <aside class="history-drawer" id="historyDrawer">
             <div class="drawer-header">
                 <span data-i18n="history_title">History</span>
-                <button class="close-btn" onclick="toggleHistory()">
-                    <i data-lucide="x"></i>
-                </button>
+                <div class="drawer-header-actions">
+                    <button class="expand-btn" onclick="openFullHistory()" title="Full Gallery">
+                        <i data-lucide="maximize-2"></i>
+                    </button>
+                    <button class="close-btn" onclick="toggleHistory()">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
             </div>
-            <div id="historyList" class="history-list"></div>
-            <div id="emptyHistory" class="empty-state">
-                <i data-lucide="inbox"></i>
-                <p data-i18n="history_empty">No creations yet</p>
+            <div class="history-toolbar-shell">
+                <div class="history-toolbar">
+                    <label class="history-search" for="historySearchInput">
+                        <span class="history-search-icon" aria-hidden="true">
+                            <i data-lucide="search"></i>
+                        </span>
+                        <input id="historySearchInput" type="text" inputmode="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="history_search_placeholder" placeholder="Search prompts">
+                        <button id="historySearchClear" class="history-search-clear" type="button" data-i18n-title="history_search_clear" title="Clear search" hidden>
+                            <i data-lucide="x"></i>
+                        </button>
+                    </label>
+                    <div id="historyFilterBar" class="history-filter-bar">
+                        <button type="button" class="history-filter-chip active" data-history-filter="all" data-i18n="history_filter_all" aria-pressed="true">All</button>
+                        <button type="button" class="history-filter-chip" data-history-filter="image" data-i18n="history_filter_images" aria-pressed="false">Images</button>
+                        <button type="button" class="history-filter-chip" data-history-filter="video" data-i18n="history_filter_videos" aria-pressed="false">Videos</button>
+                        <button type="button" class="history-filter-chip" data-history-filter="3d" data-i18n="history_filter_3d" aria-pressed="false">3D</button>
+                    </div>
+                </div>
+                <div id="historyResultsMeta" class="history-results-meta"></div>
+            </div>
+            <div class="history-scroll-region">
+                <div id="historyList" class="history-list"></div>
+                <div id="emptyHistory" class="empty-state history-empty-state">
+                    <i data-lucide="inbox"></i>
+                    <p id="emptyHistoryText" data-i18n="history_empty">No creations yet</p>
+                </div>
             </div>
         </aside>
         <div class="drawer-overlay" id="drawerOverlay" onclick="toggleHistory()"></div>
+
+        <!-- Model News Drawer -->
+        <aside class="news-drawer" id="newsDrawer">
+            <div class="drawer-header">
+                <span data-i18n="news_title">News</span>
+                <button class="close-btn" onclick="toggleNews()">
+                    <i data-lucide="x"></i>
+                </button>
+            </div>
+            <div class="news-subtitle" data-i18n="news_last_3_days">New models added in the last 3 days</div>
+            <div id="newsList" class="news-list"></div>
+            <div id="emptyNews" class="empty-state" style="display:none;">
+                <i data-lucide="newspaper"></i>
+                <p data-i18n="news_empty">No new models in the last 3 days</p>
+            </div>
+        </aside>
+        <div class="drawer-overlay" id="newsOverlay" onclick="toggleNews()"></div>
+
+        <!-- Fullscreen History Gallery -->
+        <div class="fhg" id="fullHistoryGallery" style="display:none;">
+            <div class="fhg-backdrop"></div>
+            <div class="fhg-container">
+                <header class="fhg-header">
+                    <button class="fhg-back" onclick="closeFullHistory()">
+                        <i data-lucide="arrow-left"></i>
+                        <span data-i18n="history_title">History</span>
+                    </button>
+                    <div class="fhg-toolbar">
+                        <label class="fhg-search" for="fhgSearchInput">
+                            <i data-lucide="search"></i>
+                            <input id="fhgSearchInput" type="text" inputmode="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="history_search_placeholder" placeholder="Search prompts">
+                        </label>
+                        <div class="fhg-filters" id="fhgFilterBar">
+                            <button type="button" class="fhg-filter active" data-fhg-filter="all" data-i18n="history_filter_all">All</button>
+                            <button type="button" class="fhg-filter" data-fhg-filter="image" data-i18n="history_filter_images">Images</button>
+                            <button type="button" class="fhg-filter" data-fhg-filter="video" data-i18n="history_filter_videos">Videos</button>
+                            <button type="button" class="fhg-filter" data-fhg-filter="3d" data-i18n="history_filter_3d">3D</button>
+                        </div>
+                    </div>
+                    <div class="fhg-meta" id="fhgMeta"></div>
+                </header>
+                <div class="fhg-scroll" id="fhgScroll">
+                    <div class="fhg-grid" id="fhgGrid"></div>
+                    <div class="fhg-empty" id="fhgEmpty" style="display:none;">
+                        <i data-lucide="inbox"></i>
+                        <p data-i18n="history_empty">No creations yet</p>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div id="statusToast" class="toast"></div>
@@ -1166,11 +1323,122 @@
         </div>
     </div>
 
-    <script src="./translations.js"></script>
-    <script src="./i18n.js"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
-    <script type="module" src="./app.js"></script>
+    <!-- Session check spinner (no text, centered only) -->
+    <div id="sessionCheckOverlay" class="session-check-overlay">
+        <div class="session-check-spinner">
+            <div class="session-check-ring"></div>
+            <div class="session-check-ring session-check-ring--inner"></div>
+            <div class="session-check-core"></div>
+        </div>
+    </div>
+
+    <div id="authGate" class="auth-gate">
+        <div class="auth-gate-bg">
+            <div class="auth-gate-orb auth-gate-orb--1"></div>
+            <div class="auth-gate-orb auth-gate-orb--2"></div>
+            <div class="auth-gate-orb auth-gate-orb--3"></div>
+        </div>
+        <div class="auth-shell">
+            <div class="auth-panel">
+                <div class="auth-copy">
+                    <span class="auth-kicker" id="authKicker">Private Studio</span>
+                    <h1 class="auth-title" id="authTitle">Continue with Google</h1>
+                    <p class="auth-body" id="authBody">Sign in once to open your account, keep your history, and sync your presets.</p>
+                    <div class="auth-loader" id="authLoader" aria-hidden="true">
+                        <span class="auth-loader-ring"></span>
+                        <span class="auth-loader-core"></span>
+                    </div>
+                    <div class="auth-status" id="authStatus">Checking your session…</div>
+                    <button id="authGoogleBtn" class="auth-google-btn" type="button">
+                        <svg class="auth-google-icon" viewBox="0 0 24 24" width="20" height="20"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                        <span id="authGoogleBtnLabel">Continue with Google</span>
+                    </button>
+                </div>
+                <div class="auth-aside">
+                    <span class="auth-aside-label" id="authAsideLabel">What your account keeps</span>
+                    <ul class="auth-aside-list">
+                        <li id="authBenefitHistory"><i data-lucide="clock"></i> Generation history per account</li>
+                        <li id="authBenefitPresets"><i data-lucide="sliders-horizontal"></i> Title and characteristic presets</li>
+                        <li id="authBenefitInspiration"><i data-lucide="palette"></i> Design inspiration presets and images</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="migrationModal" class="migration-modal" style="display:none;">
+        <div class="migration-card">
+            <span class="migration-pill" id="migrationPill">Existing local data found</span>
+            <h2 class="migration-title" id="migrationTitle">Register to keep your current history</h2>
+            <p class="migration-body" id="migrationBody">The first Google account you use here will receive the history and presets currently stored in this browser. After migration, they will be removed from local storage so another account cannot inherit them.</p>
+            <button id="migrationContinueBtn" class="auth-google-btn migration-google-btn" type="button">
+                <svg class="auth-google-icon" viewBox="0 0 24 24" width="20" height="20"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                <span id="migrationContinueLabel">Continue with Google</span>
+            </button>
+        </div>
+    </div>
+
+    <section id="profilePage" class="profile-screen" style="display:none;">
+        <div class="profile-screen-shell">
+            <header class="profile-screen-header">
+                <button class="profile-screen-back" type="button" onclick="closeProfilePage()">
+                    <i data-lucide="arrow-left"></i>
+                    <span id="profileBackLabel">Back</span>
+                </button>
+                <div class="profile-screen-headings">
+                    <span class="profile-screen-kicker" id="profileKicker">Account</span>
+                    <h2 class="profile-screen-title" id="profilePageTitle">Profile</h2>
+                </div>
+                <button id="profileSignOutBtn" class="profile-signout-btn" type="button">
+                    <i data-lucide="log-out"></i>
+                    <span id="profileSignOutLabel">Sign out</span>
+                </button>
+            </header>
+            <div class="profile-screen-grid">
+                <section class="profile-card profile-card--hero">
+                    <div class="profile-identity">
+                        <div class="profile-avatar" id="profileAvatar">N</div>
+                        <div class="profile-identity-copy">
+                            <h3 id="profileName">Guest</h3>
+                            <p id="profileEmail">guest@example.com</p>
+                        </div>
+                    </div>
+                    <div class="profile-status-row">
+                        <span class="profile-status-chip"><i data-lucide="calendar"></i> <span id="profileCreatedAt">Created just now</span></span>
+                        <span class="profile-status-chip"><i data-lucide="hard-drive"></i> <span id="profileMigrationState">No local migration recorded</span></span>
+                    </div>
+                </section>
+                <section class="profile-card profile-card--stats">
+                    <div class="profile-stat">
+                        <div class="profile-stat-icon"><i data-lucide="image"></i></div>
+                        <strong class="profile-stat-value" id="profileHistoryCount">0</strong>
+                        <span class="profile-stat-label" id="profileHistoryLabel">History items</span>
+                    </div>
+                    <div class="profile-stat">
+                        <div class="profile-stat-icon"><i data-lucide="type"></i></div>
+                        <strong class="profile-stat-value" id="profilePresetCount">0</strong>
+                        <span class="profile-stat-label" id="profilePresetLabel">Text presets</span>
+                    </div>
+                    <div class="profile-stat">
+                        <div class="profile-stat-icon"><i data-lucide="sparkles"></i></div>
+                        <strong class="profile-stat-value" id="profileInspirationCount">0</strong>
+                        <span class="profile-stat-label" id="profileInspirationLabel">Inspiration presets</span>
+                    </div>
+                </section>
+                <section class="profile-card profile-card--placeholder">
+                    <div class="profile-card-placeholder-icon"><i data-lucide="coins"></i></div>
+                    <span class="profile-card-label" id="profileFutureLabelCredits">Credits</span>
+                    <p id="profileFutureBodyCredits">Reserved for future credit balance and usage controls.</p>
+                </section>
+                <section class="profile-card profile-card--placeholder">
+                    <div class="profile-card-placeholder-icon"><i data-lucide="crown"></i></div>
+                    <span class="profile-card-label" id="profileFutureLabelSubscription">Subscription</span>
+                    <p id="profileFutureBodySubscription">Reserved for future subscription and billing controls.</p>
+                </section>
+            </div>
+        </div>
+    </section>
+
 
     <!-- Professional Image Editor Modal -->
     <div id="sketchModal" class="sk-modal" style="display:none;">
@@ -1327,6 +1595,13 @@
             </div>
         </div>
     </div>
+
+    <script src="./translations.js"></script>
+    <script src="./i18n.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+    <script type="module" src="./app.js"></script>
+    <script type="module" src="./account.js"></script>
 
 </body>
 

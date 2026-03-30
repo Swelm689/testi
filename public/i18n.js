@@ -30,6 +30,15 @@
   const DEFAULT_LANG = 'en';
   const RTL_LANGS = new Set(['ar']);
 
+  function isCorruptedTranslation(value) {
+    if (typeof value !== 'string') return false;
+    const compact = value.replace(/[\s0-9{}()[\].,:/\\_-]+/g, '');
+    if (!compact) return false;
+    const questionMarks = compact.match(/\?/g);
+    if (!questionMarks || questionMarks.length === 0) return false;
+    return questionMarks.length / compact.length >= 0.4;
+  }
+
   const LANGUAGES = [
     { code: 'en', native: 'English',    english: 'English',    flag: '🇺🇸' },
     { code: 'es', native: 'Español',    english: 'Spanish',    flag: '🇪🇸' },
@@ -94,6 +103,8 @@
     kling3CfgScale:    'label_cfg_scale',
     kling3GenerateAudio:'label_generate_audio',
     kling3KeepAudio:   'label_keep_audio',
+    kling3MotionOrientation:'label_character_orientation_mode',
+    kling3KeepOriginalSound:'label_keep_original_sound',
   };
 
   /* ── MAP: inputId → label i18n key ──────────────────────────────────── */
@@ -110,6 +121,21 @@
     kling3VoiceIds:    'label_voice_ids',
     kling3NegativePrompt:'label_negative_prompt',
     kling3VideoUrlInput:'label_video_url_upload',
+    kling3StartImageInput:'label_start_image',
+    kling3EndImageInput:'label_end_image',
+    kling3VideoInput:'label_video_url_upload',
+    kling3RefImagesInput:'label_ref_images',
+    threeDMeshyTextureImageInput:'label_texture_image',
+    threeDTopologyFileInput:'label_3d_file',
+    threeDRetextureModelInput:'label_3d_model_file',
+    threeDRetextureStyleImageInput:'label_style_image',
+    videoUrlInput:'label_video_url',
+    videoInput:'label_upload_video',
+    videoImageInput:'label_upload_image',
+    referenceImagesInput:'label_reference_images_video',
+    videoEndImageInput:'label_end_frame_optional',
+    videoIdInput:'label_video_id',
+    audioInput:'label_audio_file',
   };
 
   /* ── MAP: selectId → { optionValue: i18n_key } ───────────────────────
@@ -150,6 +176,8 @@
     kling3ShotType:    { customize:'opt_customize', intelligent:'opt_intelligent' },
     kling3GenerateAudio:{ true:'opt_on', false:'opt_off' },
     kling3KeepAudio:   { true:'opt_on', false:'opt_off' },
+    kling3MotionOrientation:{ image:'opt_image', video:'opt_video' },
+    kling3KeepOriginalSound:{ true:'opt_on', false:'opt_off' },
   };
 
   /* ── MAP: upload item label next to upload-area in 3D mode ─────────────
@@ -173,7 +201,7 @@
       const tr = window.TRANSLATIONS;
       if (!tr) return key;
       const locale = tr[this.lang];
-      if (locale && locale[key] !== undefined) return locale[key];
+      if (locale && locale[key] !== undefined && !isCorruptedTranslation(locale[key])) return locale[key];
       const fallback = tr[DEFAULT_LANG];
       if (fallback && fallback[key] !== undefined) return fallback[key];
       return key;

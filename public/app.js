@@ -6,8 +6,244 @@ if (window.lucide && typeof window.lucide.createIcons === 'function') {
 // State
 let currentMode = 'text';
 let currentVideoTab = 'text-to-video';
-let history = JSON.parse(localStorage.getItem('nano_history') || '[]');
-let tasks = JSON.parse(localStorage.getItem('nano_tasks') || '[]');
+let activeAccountStorageScope = null;
+let accountSyncSuspendCount = 0;
+
+function setActiveAccountStorageScope(userId) {
+  activeAccountStorageScope = userId ? String(userId) : null;
+}
+
+function getActiveAccountStorageScope() {
+  return activeAccountStorageScope || null;
+}
+
+function getScopedStorageKey(baseKey, explicitScope) {
+  const scope = explicitScope === undefined
+    ? getActiveAccountStorageScope()
+    : (explicitScope ? String(explicitScope) : null);
+  return scope ? `${baseKey}::${scope}` : baseKey;
+}
+
+function readStoredJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function loadStoredArray(baseKey) {
+  const value = readStoredJson(getScopedStorageKey(baseKey), []);
+  return Array.isArray(value) ? value : [];
+}
+
+function getHistoryCacheMetaKey(explicitScope) {
+  return getScopedStorageKey('nano_history_meta', explicitScope);
+}
+
+function createHistoryClientId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  return `hist_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function ensureHistoryItemIdentity(item) {
+  if (!item || typeof item !== 'object') return item;
+  if (!item.id || typeof item.id !== 'string') {
+    item.id = createHistoryClientId();
+  }
+  return item;
+}
+
+function getHistoryPrimaryUrl(item) {
+  const meta = item && item.meta && typeof item.meta === 'object' ? item.meta : null;
+  return (
+    (meta && (meta.originalDownloadUrl || meta.originalUrl || meta.previewUrl || meta.thumbnail_fallback || meta.placeholderUrl))
+    || item.modelDownloadUrl
+    || item.url
+    || item.thumbnailUrl
+    || ''
+  );
+}
+
+function getHistorySemanticKey(item) {
+  if (!item || typeof item !== 'object') return '';
+  const meta = item.meta && typeof item.meta === 'object' ? item.meta : null;
+  const clientId = meta && meta.clientId ? String(meta.clientId) : '';
+  if (clientId) return `client:${clientId}`;
+  if (!item.cloud && item.id) return `local:${String(item.id)}`;
+  const type = item.type || 'image';
+  const timestamp = Number.isFinite(Number(item.timestamp)) ? Number(item.timestamp) : 0;
+  const primaryUrl = getHistoryPrimaryUrl(item);
+  if (primaryUrl) return `media:${type}:${timestamp}:${primaryUrl}`;
+  const requestId = item.genCtx && (item.genCtx.requestId || item.genCtx.taskId || item.genCtx.jobId || item.genCtx.id)
+    ? String(item.genCtx.requestId || item.genCtx.taskId || item.genCtx.jobId || item.genCtx.id)
+    : '';
+  if (requestId) return `req:${type}:${requestId}`;
+  const prompt = item.prompt ? String(item.prompt).trim() : '';
+  if (prompt) return `prompt:${type}:${timestamp}:${prompt.slice(0, 200)}`;
+  return '';
+}
+
+function getHistoryIdentityKey(item, fallbackIndex = 0) {
+  const semanticKey = getHistorySemanticKey(item);
+  if (semanticKey) return semanticKey;
+  if (item && item.id) return `id:${item.id}`;
+  const type = item && item.type ? item.type : 'image';
+  const primaryUrl = getHistoryPrimaryUrl(item);
+  const timestamp = Number.isFinite(Number(item && item.timestamp)) ? Number(item.timestamp) : 0;
+  return `fallback:${type}:${timestamp}:${primaryUrl}:${fallbackIndex}`;
+}
+
+const LOCAL_HISTORY_CACHE_LIMIT = 120;
+
+function normalizeHistoryItemForRuntime(item) {
+  if (!item || typeof item !== 'object') return item;
+  const next = item;
+  const meta = next.meta && typeof next.meta === 'object' ? next.meta : null;
+  const type = next.type || 'image';
+  const originalUrl = meta && meta.originalUrl ? String(meta.originalUrl) : '';
+  const originalDownloadUrl = meta && meta.originalDownloadUrl ? String(meta.originalDownloadUrl) : '';
+  const previewUrl = meta && meta.previewUrl ? String(meta.previewUrl) : '';
+  const fallbackThumb = meta && meta.thumbnail_fallback ? String(meta.thumbnail_fallback) : '';
+
+  ensureHistoryItemIdentity(next);
+
+  if (type === 'video') {
+    if ((!next.url || /^data:image\//i.test(String(next.url))) && (originalUrl || originalDownloadUrl)) {
+      next.url = originalUrl || originalDownloadUrl;
+    }
+    if (next.thumbnailUrl && next.url && String(next.thumbnailUrl) === String(next.url)) {
+      next.thumbnailUrl = fallbackThumb && fallbackThumb !== next.url ? fallbackThumb : null;
+    }
+    if (!next.thumbnailUrl) {
+      const thumbCandidate = fallbackThumb || (previewUrl && previewUrl !== next.url ? previewUrl : '');
+      if (thumbCandidate && thumbCandidate !== next.url) next.thumbnailUrl = thumbCandidate;
+    }
+  } else if (type === 'image') {
+    if (originalUrl && (!next.url || (fallbackThumb && String(next.url) === fallbackThumb))) {
+      next.url = originalUrl;
+    }
+    if (!next.thumbnailUrl) {
+      const thumbCandidate = fallbackThumb || (previewUrl && previewUrl !== next.url ? previewUrl : '');
+      if (thumbCandidate && thumbCandidate !== next.url) next.thumbnailUrl = thumbCandidate;
+    }
+  } else if (type === '3d') {
+    if (!next.url && (fallbackThumb || previewUrl)) next.url = fallbackThumb || previewUrl;
+    if (!next.modelDownloadUrl && (originalDownloadUrl || originalUrl)) {
+      next.modelDownloadUrl = originalDownloadUrl || originalUrl;
+    }
+    if (!next.thumbnailUrl && (fallbackThumb || previewUrl)) next.thumbnailUrl = fallbackThumb || previewUrl;
+  }
+
+  return next;
+}
+
+function sortHistoryItems(items) {
+  return items.sort((a, b) => {
+    const at = Number.isFinite(Number(a && a.timestamp)) ? Number(a.timestamp) : 0;
+    const bt = Number.isFinite(Number(b && b.timestamp)) ? Number(b.timestamp) : 0;
+    return bt - at;
+  });
+}
+
+function dedupeHistoryItems(items) {
+  const map = new Map();
+  (Array.isArray(items) ? items : []).forEach((item, index) => {
+    if (!item) return;
+    const normalizedItem = normalizeHistoryItemForRuntime(item);
+    const key = getHistoryIdentityKey(normalizedItem, index);
+    const existing = map.get(key);
+    map.set(key, existing ? Object.assign(existing, normalizedItem) : normalizedItem);
+  });
+  return sortHistoryItems(Array.from(map.values()));
+}
+
+function buildHistoryCacheMeta(items, options = {}) {
+  const list = Array.isArray(items) ? items : [];
+  const persistedCount = Number.isFinite(Number(options.persistedCount))
+    ? Math.max(0, Math.min(list.length, Number(options.persistedCount)))
+    : list.length;
+  return {
+    count: list.length,
+    cachedCount: persistedCount,
+    complete: persistedCount >= list.length,
+    savedAt: Date.now(),
+    newestId: list[0] && list[0].id ? list[0].id : null,
+    newestTimestamp: list[0] && Number.isFinite(Number(list[0].timestamp)) ? Number(list[0].timestamp) : null,
+  };
+}
+
+function getScopedHistoryCacheMeta(explicitScope) {
+  const raw = readStoredJson(getHistoryCacheMetaKey(explicitScope), null);
+  if (!raw || typeof raw !== 'object') {
+    return { count: 0, cachedCount: 0, complete: false, savedAt: 0, newestId: null, newestTimestamp: null };
+  }
+  return {
+    count: Number.isFinite(Number(raw.count)) ? Math.max(0, Number(raw.count)) : 0,
+    cachedCount: Number.isFinite(Number(raw.cachedCount))
+      ? Math.max(0, Number(raw.cachedCount))
+      : (Number.isFinite(Number(raw.count)) ? Math.max(0, Number(raw.count)) : 0),
+    complete: raw.complete !== false,
+    savedAt: Number.isFinite(Number(raw.savedAt)) ? Number(raw.savedAt) : 0,
+    newestId: raw.newestId ? String(raw.newestId) : null,
+    newestTimestamp: Number.isFinite(Number(raw.newestTimestamp)) ? Number(raw.newestTimestamp) : null,
+  };
+}
+
+function persistHistoryCacheMeta(items, explicitScope, options = {}) {
+  try {
+    localStorage.setItem(getHistoryCacheMetaKey(explicitScope), JSON.stringify(buildHistoryCacheMeta(items, options)));
+  } catch (_) {}
+}
+
+function withAccountSyncSuspended(fn) {
+  accountSyncSuspendCount += 1;
+  try {
+    return fn();
+  } finally {
+    accountSyncSuspendCount = Math.max(0, accountSyncSuspendCount - 1);
+  }
+}
+
+function isAccountSyncSuspended() {
+  return accountSyncSuspendCount > 0;
+}
+
+function isPrimaryCoarsePointer() {
+  try {
+    return !!(window.matchMedia && (
+      window.matchMedia('(pointer: coarse)').matches
+      || window.matchMedia('(hover: none)').matches
+    ));
+  } catch (_) {
+    return false;
+  }
+}
+
+function shouldSkipClientHistoryThumbnailWork() {
+  return document.hidden || isPrimaryCoarsePointer() || !!activeTouchAssetDrag;
+}
+
+function canGenerateClientHistoryThumbnail(item) {
+  if (!item || !item.url || item.thumbnailUrl || item.type === '3d') return false;
+  if (shouldSkipClientHistoryThumbnailWork()) return false;
+  return item.type === 'video';
+}
+
+// Account history/tasks are loaded after the signed-in scope is known.
+let history = [];
+let tasks = [];
+const HISTORY_FILTERS = [
+  { id: 'all', types: null },
+  { id: 'image', types: ['image'] },
+  { id: 'video', types: ['video'] },
+  { id: '3d', types: ['3d'] },
+];
+let historyViewState = { type: HISTORY_FILTERS[0].id, query: '' };
+let historyHydrating = false;
 
 const pollTimers = new Map();
 
@@ -44,17 +280,109 @@ let uploadedKling3RefImages = [];
 
 // Tools mode state
 let uploadedToolsImages = [];
+const managedUploadRemoteState = Object.create(null);
 let toolsCharsCount = 0;
 let currentKling3Tab = 'v3-text-to-video';
 let currentKling3Family = 'v3';
+let currentLtx23Family = 'text-to-video';
 let kling3MultiPrompts = [];
-let kling3Elements = []; // KlingV3ElementInput: { id, frontalImageFile, referenceImageFiles, videoFile }
+let kling3Elements = []; // KlingV3ElementInput: { id, frontalImageFile, frontalImageUrl, referenceImageFiles, referenceImageUrls, videoFile, videoUrl }
 let kling3SelectedModelByTab = {};
 let kling3LastTabByFamily = { v3: 'v3-text-to-video', o3: 'o3-text-to-video' };
+let kling3ControlsInitialized = false;
+let ltx23SelectedModelByFamily = {};
+
+function isRemoteAssetItem(item) {
+  return !!(item && typeof item === 'object' && item.__remoteAsset && typeof item.url === 'string' && item.url);
+}
+
+function createRemoteAssetItem(payload = {}) {
+  if (!payload || !payload.url) return null;
+  const type = payload.type || (String(payload.mimeHint || '').startsWith('video/') ? 'video' : 'image');
+  const fallbackExt = type === 'video' ? 'mp4' : type === 'audio' ? 'mp3' : 'png';
+  const name = payload.filename || deriveFilenameFromUrl(payload.url, fallbackExt);
+  return {
+    __remoteAsset: true,
+    url: String(payload.url),
+    name,
+    type: payload.mimeHint || inferMimeTypeFromName(name, type === 'video' ? 'video/mp4' : type === 'audio' ? 'audio/mpeg' : 'image/png'),
+    assetType: type,
+  };
+}
+
+function normalizeRemoteAssetItems(value, fallbackKind = 'image') {
+  const list = Array.isArray(value) ? value : (value ? [value] : []);
+  return list
+    .map((entry) => {
+      if (!entry) return null;
+      if (typeof entry === 'string') {
+        return createRemoteAssetItem({ url: entry, type: fallbackKind });
+      }
+      if (isRemoteAssetItem(entry)) return entry;
+      if (typeof entry === 'object' && entry.url) {
+        return createRemoteAssetItem({
+          url: entry.url,
+          filename: entry.name || entry.filename,
+          mimeHint: entry.type || entry.mimeHint,
+          type: entry.assetType || fallbackKind,
+        });
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function getAssetItemName(item, fallback = 'asset') {
+  if (!item) return fallback;
+  if (isRemoteAssetItem(item)) return item.name || deriveFilenameFromUrl(item.url, 'bin');
+  return item.name || fallback;
+}
+
+function getAssetItemPreviewUrl(item) {
+  if (!item) return '';
+  return isRemoteAssetItem(item) ? item.url : '';
+}
+
+function clearPreviewBlobUrls(host) {
+  if (!host || !Array.isArray(host._previewBlobUrls)) {
+    if (host) host._previewBlobUrls = [];
+    return;
+  }
+  host._previewBlobUrls.forEach((url) => {
+    try { URL.revokeObjectURL(url); } catch (_) {}
+  });
+  host._previewBlobUrls = [];
+}
+
+function getPreviewSrcForAssetItem(item, host) {
+  if (!item) return '';
+  if (isRemoteAssetItem(item)) return item.url;
+  const blobUrl = URL.createObjectURL(item);
+  if (host) {
+    if (!Array.isArray(host._previewBlobUrls)) host._previewBlobUrls = [];
+    host._previewBlobUrls.push(blobUrl);
+  }
+  return blobUrl;
+}
+
+async function ensureFileLikeAssetItem(item) {
+  if (!item) return null;
+  if (!isRemoteAssetItem(item)) return item;
+  return fetchUrlAsFile(item.url, {
+    type: item.assetType || 'image',
+    filename: item.name,
+    mimeHint: item.type,
+  });
+}
+const NEWS_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const DEFAULT_IMAGE_TEXT_MODEL = 'nano-banana-pro';
+const DEFAULT_IMAGE_EDIT_MODEL = 'nano-banana-pro/edit';
+const DEFAULT_TOOLS_MODEL = DEFAULT_IMAGE_EDIT_MODEL;
+const DEFAULT_3D_MODEL = 'fal-ai/meshy/v6-preview/image-to-3d';
 
 const IMAGE_MODELS_TEXT = [
-  { id: 'nano-banana-2', label: 'Nano Banana 2' },
   { id: 'nano-banana-pro', label: 'Nano Banana Pro' },
+  { id: 'nano-banana-2', label: 'Nano Banana 2' },
   { id: 'gpt-image-1.5', label: 'GPT-Image 1.5' },
   { id: 'flux-pro-v1.1-ultra', label: 'Flux Pro v1.1 Ultra' },
 ];
@@ -66,22 +394,26 @@ const EDIT_MAX_IMAGES = {
 };
 function editMaxImages() {
   const sel = qs('imageModelEdit');
-  const id = sel ? sel.value : 'nano-banana-2/edit';
-  return EDIT_MAX_IMAGES[id] || 4;
+  const id = sel ? sel.value : DEFAULT_IMAGE_EDIT_MODEL;
+  return EDIT_MAX_IMAGES[id] || EDIT_MAX_IMAGES[DEFAULT_IMAGE_EDIT_MODEL] || 4;
 }
 
 const IMAGE_MODELS_EDIT = [
-  { id: 'nano-banana-2/edit', label: 'Nano Banana 2 (Edit)' },
   { id: 'nano-banana-pro/edit', label: 'Nano Banana Pro (Edit)' },
+  { id: 'nano-banana-2/edit', label: 'Nano Banana 2 (Edit)' },
   { id: 'gpt-image-1.5/edit', label: 'GPT-Image 1.5 (Edit)' },
 ];
+const TOOLS_MODELS = IMAGE_MODELS_EDIT.map((model) => ({
+  id: model.id,
+  label: model.label.replace(/\s+\(Edit\)$/, ''),
+}));
 
 const THREE_D_MODELS = [
-  { id: 'fal-ai/hunyuan3d-v3/image-to-3d', label: 'Hunyuan3D V3 (Image to 3D)', kind: 'image-to-3d', provider: 'fal' },
-  { id: 'fal-ai/hunyuan3d-v3/text-to-3d', label: 'Hunyuan3D V3 (Text to 3D)', kind: 'text-to-3d', provider: 'fal' },
   { id: 'fal-ai/meshy/v6-preview/image-to-3d', label: 'Meshy V6 Preview (Image to 3D)', kind: 'image-to-3d', provider: 'fal' },
-  { id: 'fal-ai/meshy/v6-preview/text-to-3d', label: 'Meshy V6 Preview (Text to 3D)', kind: 'text-to-3d', provider: 'fal' },
+  { id: 'fal-ai/hunyuan3d-v3/image-to-3d', label: 'Hunyuan3D V3 (Image to 3D)', kind: 'image-to-3d', provider: 'fal' },
   { id: 'fal-ai/hunyuan-3d/v3.1/rapid/image-to-3d', label: 'Hunyuan3D V3.1 Rapid (Image to 3D)', kind: 'image-to-3d', provider: 'fal' },
+  { id: 'fal-ai/meshy/v6-preview/text-to-3d', label: 'Meshy V6 Preview (Text to 3D)', kind: 'text-to-3d', provider: 'fal' },
+  { id: 'fal-ai/hunyuan3d-v3/text-to-3d', label: 'Hunyuan3D V3 (Text to 3D)', kind: 'text-to-3d', provider: 'fal' },
   { id: 'fal-ai/hunyuan-3d/v3.1/smart-topology', label: 'Hunyuan3D V3.1 Smart Topology', kind: 'topology', provider: 'fal' },
   { id: 'fal-ai/meshy/v5/retexture', label: 'Meshy V5 Retexture', kind: 'retexture', provider: 'fal' },
 ];
@@ -94,6 +426,20 @@ const KLING3_MODELS = {
   'v3-image-to-video': [
     { id: 'kling-v3-pro-i2v', label: 'Kling 3.0 Pro (Image to Video)' },
   ],
+  'v3-motion-control': [
+    {
+      id: 'kling-v3-pro-motion-control',
+      label: 'Kling 3.0 Pro (Motion Control)',
+      addedAt: '2026-03-05T00:00:00.000Z',
+      newsDescriptionKey: 'news_desc_kling_v3_pro_motion',
+    },
+    {
+      id: 'kling-v3-standard-motion-control',
+      label: 'Kling 3.0 Standard (Motion Control)',
+      addedAt: '2026-03-05T00:00:00.000Z',
+      newsDescriptionKey: 'news_desc_kling_v3_standard_motion',
+    },
+  ],
   'o3-text-to-video': [
     { id: 'kling-o3-pro-t2v', label: 'Kling O3 Pro (Text to Video)' },
   ],
@@ -104,17 +450,235 @@ const KLING3_MODELS = {
     { id: 'kling-o3-pro-ref2v', label: 'Kling O3 Pro (Reference to Video)' },
   ],
   'o3-video-to-video': [
-    { id: 'kling-o3-pro-v2v-edit', label: 'Kling O3 Pro (V2V Edit)' },
     { id: 'kling-o3-pro-v2v-ref', label: 'Kling O3 Pro (V2V Reference)' },
+    { id: 'kling-o3-pro-v2v-edit', label: 'Kling O3 Pro (V2V Edit)' },
   ],
 };
+
+const KLING3_MOTION_MODEL_IDS = new Set([
+  'kling-v3-standard-motion-control',
+  'kling-v3-pro-motion-control',
+]);
+
+const KLING3_MODEL_TO_TAB = new Map(
+  Object.entries(KLING3_MODELS).flatMap(([tab, models]) => (models || []).map((model) => [model.id, tab])),
+);
+
+const KLING3_TAB_TO_VIDEO_TAB = {
+  'v3-text-to-video': 'text-to-video',
+  'o3-text-to-video': 'text-to-video',
+  'v3-image-to-video': 'image-to-video',
+  'o3-image-to-video': 'image-to-video',
+  'v3-motion-control': 'video-to-video',
+  'o3-video-to-video': 'video-to-video',
+  'o3-reference-to-video': 'reference-to-video',
+};
+
+const LTX23_MODELS = {
+  'text-to-video': [
+    { id: 'ltx-2.3-pro-t2v', label: 'Pro' },
+    { id: 'ltx-2.3-fast-t2v', label: 'Fast' },
+  ],
+  'image-to-video': [
+    { id: 'ltx-2.3-pro-i2v', label: 'Pro' },
+    { id: 'ltx-2.3-fast-i2v', label: 'Fast' },
+  ],
+  'video-to-video': [
+    { id: 'ltx-2.3-retake-v2v', label: 'Retake' },
+    { id: 'ltx-2.3-extend-v2v', label: 'Extend' },
+  ],
+  'audio-to-video': [
+    { id: 'ltx-2.3-a2v', label: 'Audio' },
+  ],
+};
+
+const LTX23_MODEL_TO_FAMILY = new Map(
+  Object.entries(LTX23_MODELS).flatMap(([family, models]) => (models || []).map((model) => [model.id, family])),
+);
+
+function isKling3VideoKind(kind) {
+  return String(kind || '').trim().startsWith('kling3-');
+}
+
+function getLtx23FamilyForModelId(modelId) {
+  return modelId ? (LTX23_MODEL_TO_FAMILY.get(String(modelId).trim()) || null) : null;
+}
+
+function isLtx23VideoModelId(modelId) {
+  return !!getLtx23FamilyForModelId(modelId);
+}
+
+function getSelectedLtx23ModelId(fallback = '') {
+  if (fallback && isLtx23VideoModelId(fallback)) return fallback;
+  const videoModelId = qs('videoModel') ? String(qs('videoModel').value || '').trim() : '';
+  if (isLtx23VideoModelId(videoModelId)) return videoModelId;
+  return '';
+}
+
+function getKling3TabForModelId(modelId) {
+  return modelId ? (KLING3_MODEL_TO_TAB.get(String(modelId).trim()) || null) : null;
+}
+
+function isKling3VideoModelId(modelId) {
+  return !!getKling3TabForModelId(modelId);
+}
+
+function getKling3FamilyForTab(tab) {
+  return String(tab || '').startsWith('o3-') ? 'o3' : 'v3';
+}
+
+function getVideoTabForKling3Tab(tab) {
+  return KLING3_TAB_TO_VIDEO_TAB[String(tab || '').trim()] || null;
+}
+
+function getSelectedKling3ModelId(fallback = '') {
+  if (fallback && isKling3VideoModelId(fallback)) return fallback;
+  const videoModelId = qs('videoModel') ? String(qs('videoModel').value || '').trim() : '';
+  if (isKling3VideoModelId(videoModelId)) return videoModelId;
+  const klingModelId = qs('kling3Model') ? String(qs('kling3Model').value || '').trim() : '';
+  if (isKling3VideoModelId(klingModelId)) return klingModelId;
+  return '';
+}
+
+function isKling3MotionModelId(modelId) {
+  return KLING3_MOTION_MODEL_IDS.has(modelId);
+}
+
+function isKling3MotionOrientationVideo() {
+  const orientation = qs('kling3MotionOrientation') ? qs('kling3MotionOrientation').value : 'video';
+  return orientation === 'video';
+}
 
 let VIDEO_MODELS = [];
 let VIDEO_MODEL_MAP = new Map();
 let videoModelsLoaded = false;
+let videoModelsPromise = null;
 
 function qs(id) {
   return document.getElementById(id);
+}
+
+let viewportLockRaf = 0;
+
+function syncViewportLock() {
+  const viewport = window.visualViewport;
+  const viewportHeight = Math.max(1, Math.round((viewport && Number.isFinite(viewport.height) && viewport.height > 0 ? viewport.height : window.innerHeight) || window.innerHeight || 0));
+  document.documentElement.style.setProperty('--app-vh', `${viewportHeight}px`);
+  if (window.scrollX || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop) {
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }
+}
+
+function scheduleViewportLockSync() {
+  if (viewportLockRaf) return;
+  viewportLockRaf = requestAnimationFrame(() => {
+    viewportLockRaf = 0;
+    syncViewportLock();
+  });
+}
+
+function getScrollableContainer(el) {
+  let node = el ? el.parentElement : null;
+  while (node && node !== document.body) {
+    const style = window.getComputedStyle(node);
+    if (/(auto|scroll|overlay)/.test(style.overflowY || '') && node.scrollHeight > node.clientHeight + 4) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function scrollElementWithinContainer(el, options = {}) {
+  if (!el || typeof el.getBoundingClientRect !== 'function') return;
+  const container = getScrollableContainer(el);
+  if (!container) {
+    scheduleViewportLockSync();
+    return;
+  }
+  const { behavior = 'smooth', block = 'center' } = options;
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = el.getBoundingClientRect();
+  const targetTop = targetRect.top - containerRect.top + container.scrollTop;
+  let nextTop = targetTop;
+
+  if (block === 'center') {
+    nextTop -= Math.max(0, (container.clientHeight - targetRect.height) / 2);
+  } else if (block === 'nearest') {
+    const currentTop = container.scrollTop;
+    const currentBottom = currentTop + container.clientHeight;
+    const targetBottom = targetTop + targetRect.height;
+    if (targetTop < currentTop) {
+      nextTop = targetTop - 12;
+    } else if (targetBottom > currentBottom) {
+      nextTop = targetBottom - container.clientHeight + 12;
+    } else {
+      scheduleViewportLockSync();
+      return;
+    }
+  } else {
+    nextTop -= 12;
+  }
+
+  container.scrollTo({ top: Math.max(0, nextTop), behavior });
+  scheduleViewportLockSync();
+}
+
+window.addEventListener('resize', scheduleViewportLockSync, { passive: true });
+window.addEventListener('orientationchange', scheduleViewportLockSync, { passive: true });
+window.addEventListener('pageshow', scheduleViewportLockSync, { passive: true });
+window.addEventListener('focus', scheduleViewportLockSync, true);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) scheduleViewportLockSync();
+});
+document.addEventListener('focusin', (e) => {
+  const target = e.target;
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/i.test(target.tagName || '')) {
+    setTimeout(scheduleViewportLockSync, 140);
+  }
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', scheduleViewportLockSync, { passive: true });
+  window.visualViewport.addEventListener('scroll', scheduleViewportLockSync, { passive: true });
+}
+scheduleViewportLockSync();
+
+function getAccountBridge() {
+  return window.NanoAccountBridge || null;
+}
+
+function queueAccountTextPresetSync() {
+  if (isAccountSyncSuspended()) return;
+  const bridge = getAccountBridge();
+  if (bridge && typeof bridge.queueTextPresetSync === 'function') {
+    bridge.queueTextPresetSync();
+  }
+}
+
+function queueAccountDesignPresetSync() {
+  if (isAccountSyncSuspended()) return;
+  const bridge = getAccountBridge();
+  if (bridge && typeof bridge.queueDesignPresetSync === 'function') {
+    bridge.queueDesignPresetSync();
+  }
+}
+
+function queueAccountHistoryPersist(items) {
+  if (isAccountSyncSuspended()) return;
+  const bridge = getAccountBridge();
+  if (bridge && typeof bridge.queueHistoryPersist === 'function') {
+    bridge.queueHistoryPersist(items);
+  }
+}
+
+function queueAccountHistoryDelete(item) {
+  if (isAccountSyncSuspended()) return;
+  const bridge = getAccountBridge();
+  if (bridge && typeof bridge.queueHistoryDelete === 'function') {
+    bridge.queueHistoryDelete(item);
+  }
 }
 
 // ---- Drag & Drop utility ----
@@ -131,48 +695,317 @@ function fileMatchesAccept(file, accept) {
   return false;
 }
 
+const INTERNAL_ASSET_MIME = 'application/x-nano-asset';
+
+function getI18nText(key, fallback) {
+  if (window.I18N && typeof window.I18N.t === 'function') {
+    const translated = window.I18N.t(key);
+    if (translated && translated !== key) return translated;
+  }
+  return fallback || key;
+}
+
+function hasTransferType(dt, type) {
+  if (!dt || !dt.types) return false;
+  return Array.from(dt.types).includes(type);
+}
+
+function isExternalFileTransfer(dt) {
+  return hasTransferType(dt, 'Files');
+}
+
+function isInternalAssetTransfer(dt) {
+  return hasTransferType(dt, INTERNAL_ASSET_MIME) || hasTransferType(dt, 'text/uri-list');
+}
+
+function canHandleDropTransfer(dt) {
+  return isExternalFileTransfer(dt) || isInternalAssetTransfer(dt);
+}
+
+function isUploadSurface(target) {
+  return !!(target && typeof target.closest === 'function' && target.closest('.upload-zone, .upload-area'));
+}
+
+function inferMimeTypeFromName(name, fallback = 'application/octet-stream') {
+  const lower = String(name || '').toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.m4a')) return 'audio/mp4';
+  return fallback;
+}
+
+function deriveFilenameFromUrl(url, fallbackExt = 'bin') {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    const file = parsed.pathname.split('/').pop();
+    if (file) return decodeURIComponent(file);
+  } catch (_) {
+    const clean = String(url || '').split('?')[0].split('#')[0];
+    const file = clean.split('/').pop();
+    if (file) return decodeURIComponent(file);
+  }
+  return `asset.${fallbackExt}`;
+}
+
+function readUriList(uriList) {
+  const lines = String(uriList || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.find((line) => !line.startsWith('#')) || '';
+}
+
+function getInternalAssetPayload(dt, inputEl) {
+  if (!dt) return null;
+  let payload = null;
+  if (hasTransferType(dt, INTERNAL_ASSET_MIME)) {
+    try {
+      payload = JSON.parse(dt.getData(INTERNAL_ASSET_MIME) || 'null');
+    } catch (_) {
+      payload = null;
+    }
+  }
+  if (!payload || !payload.url) {
+    const url = readUriList(dt.getData('text/uri-list'));
+    if (url) payload = { url };
+  }
+  if (!payload || !payload.url) return null;
+
+  const accept = String((inputEl && inputEl.accept) || '').toLowerCase();
+  let inferredType = payload.type || '';
+  if (!inferredType) {
+    if (accept.includes('image/')) inferredType = 'image';
+    else if (accept.includes('video/')) inferredType = 'video';
+    else if (accept.includes('audio/')) inferredType = 'audio';
+  }
+
+  const fallbackExt = inferredType === 'image' ? 'png' : inferredType === 'video' ? 'mp4' : inferredType === 'audio' ? 'mp3' : 'bin';
+  const filename = payload.filename || deriveFilenameFromUrl(payload.url, fallbackExt);
+  const mimeHint = payload.mimeHint || inferMimeTypeFromName(filename, inferredType ? `${inferredType}/*` : 'application/octet-stream');
+
+  return {
+    ...payload,
+    type: inferredType || payload.type || '',
+    filename,
+    mimeHint,
+  };
+}
+
+function getDropRejectMessage(accept) {
+  const normalized = String(accept || '').toLowerCase();
+  if (normalized.includes('image/')) return getI18nText('drop_accept_images_only', 'This target accepts images only.');
+  if (normalized.includes('video/')) return getI18nText('drop_accept_videos_only', 'This target accepts videos only.');
+  if (normalized.includes('audio/')) return getI18nText('drop_accept_audio_only', 'This target accepts audio only.');
+  return getI18nText('drop_accept_supported_files', 'This file type is not supported here.');
+}
+
+async function fetchUrlAsFile(url, payload = {}) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  const fallbackExt = payload.type === 'image' ? 'png' : payload.type === 'video' ? 'mp4' : payload.type === 'audio' ? 'mp3' : 'bin';
+  const filename = payload.filename || deriveFilenameFromUrl(url, fallbackExt);
+  return new File([blob], filename, { type: blob.type || payload.mimeHint || inferMimeTypeFromName(filename) });
+}
+
+function assignFilesToInput(inputEl, files, opts = {}) {
+  const safeFiles = Array.from(files || []).filter(Boolean);
+  if (!inputEl || safeFiles.length === 0) return;
+  if (typeof inputEl._assignDroppedFiles === 'function') {
+    inputEl._assignDroppedFiles(safeFiles, opts);
+    return;
+  }
+  const dt = new DataTransfer();
+  safeFiles.forEach((file) => dt.items.add(file));
+  inputEl.files = dt.files;
+  inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function getUploadSurfaceForInput(inputEl, explicitZone) {
+  if (explicitZone) return explicitZone;
+  if (!inputEl || typeof inputEl.closest !== 'function') return null;
+  return inputEl.closest('.upload-zone, .upload-area');
+}
+
+function ensureUploadSurfaceLoader(surfaceEl) {
+  if (!surfaceEl) return null;
+  let loader = surfaceEl.querySelector('.upload-surface-loader');
+  if (!loader) {
+    loader = document.createElement('div');
+    loader.className = 'upload-surface-loader';
+    loader.setAttribute('aria-hidden', 'true');
+    loader.innerHTML = '<div class="spinner upload-surface-spinner"></div>';
+    surfaceEl.appendChild(loader);
+  }
+  return loader;
+}
+
+function setUploadSurfaceLoading(surfaceEl, loading) {
+  if (!surfaceEl) return;
+  ensureUploadSurfaceLoader(surfaceEl);
+  surfaceEl.classList.toggle('upload-loading', !!loading);
+  surfaceEl.setAttribute('aria-busy', loading ? 'true' : 'false');
+}
+
+function applyInternalAssetUrlToManagedInput(inputEl, payload) {
+  if (!inputEl || !payload || !payload.url) return false;
+  const config = inputEl._uploadConfig;
+  if (!config || !config.kind || (config.kind !== 'image' && config.kind !== 'video')) return false;
+  if (payload.type && config.kind && payload.type !== config.kind) return false;
+  const remoteItem = createRemoteAssetItem(payload);
+  if (!remoteItem) return false;
+  const nextRemote = config.multiple
+    ? [...getManagedUploadRemoteItems(config), remoteItem]
+    : [remoteItem];
+  if (!config.multiple) config.setFiles(null);
+  setManagedUploadRemoteItems(config, nextRemote);
+  refreshManagedUploadUi(inputEl);
+  return true;
+}
+
+function applyInternalAssetUrlToImageCollectionInput(inputEl, payload) {
+  if (!inputEl || !payload || payload.type !== 'image') return false;
+  const remoteItem = createRemoteAssetItem(payload);
+  if (!remoteItem) return false;
+
+  if (inputEl.id === 'imageInput') {
+    const max = editMaxImages();
+    if (uploadedImageFiles.length >= max) {
+      showToast(window.I18N ? I18N.t('wiz_max_images').replace('{n}', max) : `Maximum ${max} images allowed`, 'error');
+      return true;
+    }
+    uploadedImageFiles = [...uploadedImageFiles, remoteItem].slice(0, max);
+    updateImagePreview();
+    return true;
+  }
+
+  if (inputEl.id === 'toolsImageInput') {
+    const max = wizMaxImages();
+    if (uploadedToolsImages.length >= max) {
+      showToast(window.I18N ? I18N.t('wiz_max_images').replace('{n}', max) : `Maximum ${max} images`, 'error');
+      return true;
+    }
+    uploadedToolsImages = [...uploadedToolsImages, remoteItem].slice(0, max);
+    updateToolsImagePreview();
+    saveAppState();
+    return true;
+  }
+
+  return false;
+}
+
+async function applyInternalAssetPayloadToInput(inputEl, payload, options = {}) {
+  if (!inputEl || !payload || !payload.url) return false;
+  const accept = inputEl.accept || '';
+  const append = !!options.append;
+  const surfaceEl = getUploadSurfaceForInput(inputEl, options.zoneEl);
+  const uploadConfig = inputEl._uploadConfig || null;
+  const sameManagedKind = !!(
+    uploadConfig
+    && uploadConfig.kind
+    && payload.type
+    && uploadConfig.kind === payload.type
+  );
+
+  if (!sameManagedKind && !fileMatchesAccept({ name: payload.filename, type: payload.mimeHint }, accept)) {
+    showToast(getDropRejectMessage(accept), 'error');
+    return false;
+  }
+
+  setUploadSurfaceLoading(surfaceEl, true);
+  try {
+    if (applyInternalAssetUrlToManagedInput(inputEl, payload)) {
+      return true;
+    }
+    if (applyInternalAssetUrlToImageCollectionInput(inputEl, payload)) {
+      return true;
+    }
+    const fetchedFile = await fetchUrlAsFile(payload.url, payload);
+    if (!fileMatchesAccept(fetchedFile, accept)) {
+      showToast(getDropRejectMessage(accept), 'error');
+      return false;
+    }
+    assignFilesToInput(inputEl, [fetchedFile], { append, reason: options.reason || 'drop' });
+    return true;
+  } catch (err) {
+    console.error('Failed to fetch dragged asset', err);
+    showToast(getI18nText('drop_fetch_asset_failed', 'Failed to load the dragged asset.'), 'error');
+    return false;
+  } finally {
+    setUploadSurfaceLoading(surfaceEl, false);
+  }
+}
 function setupDropZone(zoneEl, inputEl) {
   if (!zoneEl || !inputEl) return;
-  zoneEl.addEventListener('dragover', (e) => {
+  if (zoneEl._dropZoneBoundFor === inputEl.id) return;
+  zoneEl._dropZoneBoundFor = inputEl.id;
+  zoneEl._dropInput = inputEl;
+
+  const markActive = (e) => {
+    if (!canHandleDropTransfer(e.dataTransfer)) return false;
     e.preventDefault();
     e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
     zoneEl.classList.add('drag-over');
+    return true;
+  };
+
+  zoneEl.addEventListener('dragover', (e) => {
+    markActive(e);
   });
   zoneEl.addEventListener('dragenter', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    zoneEl.classList.add('drag-over');
+    markActive(e);
   });
   zoneEl.addEventListener('dragleave', (e) => {
+    if (!canHandleDropTransfer(e.dataTransfer)) return;
     e.preventDefault();
     e.stopPropagation();
     if (!zoneEl.contains(e.relatedTarget)) {
       zoneEl.classList.remove('drag-over');
     }
   });
-  zoneEl.addEventListener('drop', (e) => {
+  zoneEl.addEventListener('drop', async (e) => {
+    if (!canHandleDropTransfer(e.dataTransfer)) return;
     e.preventDefault();
     e.stopPropagation();
     zoneEl.classList.remove('drag-over');
-    const files = e.dataTransfer.files;
-    if (!files || files.length === 0) return;
+
     const accept = inputEl.accept || '';
-    const multi = inputEl.multiple;
-    const dt = new DataTransfer();
-    for (let i = 0; i < files.length; i++) {
-      if (accept && !fileMatchesAccept(files[i], accept)) continue;
-      dt.items.add(files[i]);
-      if (!multi) break;
+    let acceptedFiles = Array.from((e.dataTransfer && e.dataTransfer.files) || []).filter((file) => fileMatchesAccept(file, accept));
+
+    if (acceptedFiles.length === 0 && isInternalAssetTransfer(e.dataTransfer)) {
+      const payload = getInternalAssetPayload(e.dataTransfer, inputEl);
+      if (!payload) return;
+      await applyInternalAssetPayloadToInput(inputEl, payload, { append: !!inputEl.multiple, zoneEl, reason: 'drop' });
+      return;
     }
-    if (dt.files.length === 0) return;
-    inputEl.files = dt.files;
-    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    if (acceptedFiles.length === 0) {
+      showToast(getDropRejectMessage(accept), 'error');
+      return;
+    }
+
+    assignFilesToInput(inputEl, acceptedFiles, { append: !!inputEl.multiple, reason: 'drop' });
   });
 }
 
 // Prevent browser from opening files dropped outside upload zones
-document.addEventListener('dragover', (e) => { e.preventDefault(); });
-document.addEventListener('drop', (e) => { e.preventDefault(); });
+document.addEventListener('dragover', (e) => {
+  if (isExternalFileTransfer(e.dataTransfer) && !isUploadSurface(e.target)) {
+    e.preventDefault();
+  }
+});
+document.addEventListener('drop', (e) => {
+  if (isExternalFileTransfer(e.dataTransfer) && !isUploadSurface(e.target)) {
+    e.preventDefault();
+  }
+  document.body.classList.remove('dragging-internal-asset');
+});
 
 // Force-download a cross-origin URL by fetching as blob
 async function forceDownload(url, filename) {
@@ -210,18 +1043,36 @@ const ASSET_TARGETS = {
     { label: '3D Retexture → Style Image', i18nKey: 'asset_3d_retexture_style', mode: '3d', inputId: 'threeDRetextureStyleImageInput', select3dModel: 'fal-ai/meshy/v5/retexture' },
     { label: 'Video → Image', i18nKey: 'asset_video_image', mode: 'video', inputId: 'videoImageInput', videoTab: 'image-to-video' },
     { label: 'Video → End Frame', i18nKey: 'asset_video_end_frame', mode: 'video', inputId: 'videoEndImageInput', videoTab: 'image-to-video' },
-    { label: 'Kling3 → Start Image', i18nKey: 'asset_kling3_start', mode: 'kling3', inputId: 'kling3StartImageInput', kling3Tab: 'image-to-video' },
-    { label: 'Kling3 → End Image', i18nKey: 'asset_kling3_end', mode: 'kling3', inputId: 'kling3EndImageInput', kling3Tab: 'image-to-video' },
+    { label: 'Kling3 → Start Image', i18nKey: 'asset_kling3_start', mode: 'video', inputId: 'kling3StartImageInput', videoTab: 'image-to-video', kling3Tab: 'image-to-video' },
+    { label: 'Kling3 → End Image', i18nKey: 'asset_kling3_end', mode: 'video', inputId: 'kling3EndImageInput', videoTab: 'image-to-video', kling3Tab: 'image-to-video' },
   ],
   video: [
     { label: 'Video → Video Input', i18nKey: 'asset_video_input', mode: 'video', inputId: 'videoInput', videoTab: 'video-to-video' },
-    { label: 'Kling3 → Video Input', i18nKey: 'asset_kling3_video', mode: 'kling3', inputId: 'kling3VideoInput', kling3Tab: 'video-to-video' },
+    { label: 'Kling3 → Video Input', i18nKey: 'asset_kling3_video', mode: 'video', inputId: 'kling3VideoInput', videoTab: 'video-to-video', kling3Tab: 'video-to-video' },
   ],
   '3d': [
     { label: '3D Topology → 3D File', i18nKey: 'asset_3d_topology', mode: '3d', inputId: 'threeDTopologyFileInput', select3dModel: 'fal-ai/hunyuan-3d/v3.1/smart-topology' },
     { label: '3D Retexture → 3D Model', i18nKey: 'asset_3d_retexture_model', mode: '3d', inputId: 'threeDRetextureModelInput', select3dModel: 'fal-ai/meshy/v5/retexture' },
   ],
 };
+
+function resolveAssetTargetVideoTab(target) {
+  if (!target) return null;
+  if (target.mode !== 'video') return target.videoTab || null;
+
+  // The shared video image input is used by both image-to-video and audio-to-video.
+  // When the user is already in audio-to-video, keep that workflow active instead of
+  // forcing the generic image-to-video tab.
+  if (target.inputId === 'videoImageInput') {
+    const selectedModel = getSelectedVideoModel();
+    const selectedKind = selectedModel && selectedModel.kind ? selectedModel.kind : currentVideoTab;
+    if (selectedKind === 'audio-to-video' || currentVideoTab === 'audio-to-video') {
+      return 'audio-to-video';
+    }
+  }
+
+  return target.videoTab || null;
+}
 
 let _assetMenu = null;
 
@@ -288,9 +1139,10 @@ async function applyAsset(item, target) {
     update3dUiVisibility();
   }
 
-  if (target.videoTab) {
+  const targetVideoTab = resolveAssetTargetVideoTab(target);
+  if (targetVideoTab) {
     ensureVideoControls();
-    switchVideoTab(target.videoTab);
+    switchVideoTab(targetVideoTab);
   }
 
   if (target.kling3Tab) {
@@ -313,22 +1165,16 @@ async function applyAsset(item, target) {
   await new Promise(r => setTimeout(r, 150));
 
   try {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const blob = await resp.blob();
-
-    // Derive filename from URL
-    const urlPath = new URL(url).pathname;
-    const filename = urlPath.split('/').pop() || ('asset.' + (item.type === 'video' ? 'mp4' : item.type === '3d' ? 'glb' : 'png'));
-
-    const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+    const fallbackExt = item.type === 'video' ? 'mp4' : item.type === '3d' ? (item.modelFormat || 'glb') : 'png';
+    const file = await fetchUrlAsFile(url, {
+      type: item.type === '3d' ? 'file' : item.type,
+      filename: deriveFilenameFromUrl(url, fallbackExt),
+      mimeHint: item.type === 'video' ? 'video/mp4' : item.type === '3d' ? 'application/octet-stream' : 'image/png',
+    });
     const inputEl = qs(target.inputId);
-    if (!inputEl) { showToast(window.I18N ? I18N.t('toast_input_not_found') : 'Input not found – section may not be loaded', 'error'); return; }
+    if (!inputEl) { showToast(window.I18N ? I18N.t('toast_input_not_found') : 'Input not found - section may not be loaded', 'error'); return; }
 
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    inputEl.files = dt.files;
-    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+    assignFilesToInput(inputEl, [file], { append: false, reason: 'asset' });
 
     // Close media modal if open so user can see the target section
     const modal = qs('mediaModal');
@@ -339,7 +1185,7 @@ async function applyAsset(item, target) {
     // Scroll the target into view
     const scrollTarget = inputEl.closest('.upload-zone, .upload-item, .setting-group, .form-group');
     if (scrollTarget) {
-      setTimeout(() => scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+      setTimeout(() => scrollElementWithinContainer(scrollTarget, { behavior: 'smooth', block: 'center' }), 100);
     }
 
     showToast(window.I18N ? I18N.t('toast_asset_applied') : 'Asset applied!');
@@ -349,7 +1195,636 @@ async function applyAsset(item, target) {
   }
 }
 
-function reuseFromHistory(index) {
+const MANAGED_UPLOADS = {
+  maskInput: { labelId: 'maskUploadLabel', emptyKey: 'upload_mask', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedMaskFile ? [uploadedMaskFile] : [], setFiles: (next) => { uploadedMaskFile = next || null; } },
+  videoInput: { labelId: 'videoFileLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: false, remoteUrlInputId: 'videoUrlInput', getFiles: () => uploadedVideoFile ? [uploadedVideoFile] : [], setFiles: (next) => { uploadedVideoFile = next || null; } },
+  videoImageInput: { labelId: 'videoImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedVideoImageFile ? [uploadedVideoImageFile] : [], setFiles: (next) => { uploadedVideoImageFile = next || null; } },
+  referenceImagesInput: { labelId: 'refImagesLabel', emptyKey: 'select_images', previewKind: 'image', kind: 'image', multiple: true, getFiles: () => uploadedReferenceImages, setFiles: (next) => { uploadedReferenceImages = next; } },
+  videoEndImageInput: { labelId: 'endImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedEndImageFile ? [uploadedEndImageFile] : [], setFiles: (next) => { uploadedEndImageFile = next || null; } },
+  audioInput: { labelId: 'audioFileLabel', emptyKey: 'select_audio', kind: 'audio', multiple: false, showFileName: true, getFiles: () => uploadedAudioFile ? [uploadedAudioFile] : [], setFiles: (next) => { uploadedAudioFile = next || null; } },
+  kling3StartImageInput: { labelId: 'kling3StartImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3StartImage ? [uploadedKling3StartImage] : [], setFiles: (next) => { uploadedKling3StartImage = next || null; } },
+  kling3EndImageInput: { labelId: 'kling3EndImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3EndImage ? [uploadedKling3EndImage] : [], setFiles: (next) => { uploadedKling3EndImage = next || null; } },
+  kling3VideoInput: { labelId: 'kling3VideoLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: false, remoteUrlInputId: 'kling3VideoUrlInput', getFiles: () => uploadedKling3Video ? [uploadedKling3Video] : [], setFiles: (next) => { uploadedKling3Video = next || null; } },
+  kling3RefImagesInput: { labelId: 'kling3RefImagesLabel', emptyKey: 'select_images', previewKind: 'image', kind: 'image', multiple: true, getFiles: () => uploadedKling3RefImages, setFiles: (next) => { uploadedKling3RefImages = next; } },
+  threeDFrontInput: { labelId: 'threeDFrontLabel', emptyKey: 'upload_front', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploaded3dFrontFile ? [uploaded3dFrontFile] : [], setFiles: (next) => { uploaded3dFrontFile = next || null; } },
+  threeDBackInput: { labelId: 'threeDBackLabel', emptyKey: 'upload_front', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploaded3dBackFile ? [uploaded3dBackFile] : [], setFiles: (next) => { uploaded3dBackFile = next || null; } },
+  threeDLeftInput: { labelId: 'threeDLeftLabel', emptyKey: 'upload_front', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploaded3dLeftFile ? [uploaded3dLeftFile] : [], setFiles: (next) => { uploaded3dLeftFile = next || null; } },
+  threeDRightInput: { labelId: 'threeDRightLabel', emptyKey: 'upload_front', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploaded3dRightFile ? [uploaded3dRightFile] : [], setFiles: (next) => { uploaded3dRightFile = next || null; } },
+  threeDMeshyTextureImageInput: { labelId: 'threeDMeshyTextureImageLabel', emptyKey: 'upload_texture', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploaded3dMeshyTextureImageFile ? [uploaded3dMeshyTextureImageFile] : [], setFiles: (next) => { uploaded3dMeshyTextureImageFile = next || null; } },
+  threeDTopologyFileInput: { labelId: 'threeDTopologyFileLabel', emptyKey: 'upload_glb_obj', kind: 'file', multiple: false, showFileName: true, getFiles: () => uploaded3dTopologyFile ? [uploaded3dTopologyFile] : [], setFiles: (next) => { uploaded3dTopologyFile = next || null; } },
+  threeDRetextureModelInput: { labelId: 'threeDRetextureModelLabel', emptyKey: 'upload_3d_model', kind: 'file', multiple: false, showFileName: true, getFiles: () => uploaded3dRetextureModelFile ? [uploaded3dRetextureModelFile] : [], setFiles: (next) => { uploaded3dRetextureModelFile = next || null; } },
+  threeDRetextureStyleImageInput: { labelId: 'threeDRetextureStyleImageLabel', emptyKey: 'upload_style', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploaded3dRetextureStyleImageFile ? [uploaded3dRetextureStyleImageFile] : [], setFiles: (next) => { uploaded3dRetextureStyleImageFile = next || null; } },
+};
+
+Object.entries(MANAGED_UPLOADS).forEach(([inputId, config]) => {
+  if (!config.inputId) config.inputId = inputId;
+  if (!config.stateKey) config.stateKey = inputId;
+});
+
+function toManagedFileArray(value) {
+  if (!value) return [];
+  return (Array.isArray(value) ? value : [value]).filter(Boolean);
+}
+
+function getManagedUploadFiles(config) {
+  if (!config) return [];
+  const files = toManagedFileArray(config.getFiles ? config.getFiles() : []);
+  if (files.length > 0) return files;
+  const inputEl = config.inputId ? qs(config.inputId) : null;
+  if (inputEl && inputEl.files && inputEl.files.length) {
+    return Array.from(inputEl.files).filter(Boolean);
+  }
+  return [];
+}
+
+function getManagedUploadPrimarySource(config, legacyFallback = null) {
+  const remoteItems = getManagedUploadRemoteItems(config);
+  if (remoteItems[0]) return remoteItems[0];
+  const files = getManagedUploadFiles(config);
+  if (files[0]) return files[0];
+  return legacyFallback || null;
+}
+
+function getManagedUploadStateKey(config) {
+  if (!config) return '';
+  return config.stateKey || config.inputId || '';
+}
+
+function getManagedUploadRemoteItems(config) {
+  if (!config) return [];
+  if (typeof config.getRemoteItems === 'function') {
+    return normalizeRemoteAssetItems(config.getRemoteItems(), config.kind || config.previewKind || 'image');
+  }
+  if (config.remoteUrlInputId) {
+    const remoteUrl = getManagedUploadRemoteUrl(config);
+    return remoteUrl ? normalizeRemoteAssetItems([remoteUrl], config.kind || config.previewKind || 'image') : [];
+  }
+  const key = getManagedUploadStateKey(config);
+  return key ? normalizeRemoteAssetItems(managedUploadRemoteState[key], config.kind || config.previewKind || 'image') : [];
+}
+
+function setManagedUploadRemoteItems(config, value) {
+  if (!config) return;
+  const items = normalizeRemoteAssetItems(value, config.kind || config.previewKind || 'image');
+  if (typeof config.setRemoteItems === 'function') {
+    config.setRemoteItems(config.multiple ? items : (items[0] || null));
+    return;
+  }
+  if (config.remoteUrlInputId) {
+    setManagedUploadRemoteUrl(config, items[0] ? items[0].url : '');
+    return;
+  }
+  const key = getManagedUploadStateKey(config);
+  if (key) managedUploadRemoteState[key] = config.multiple ? items : (items[0] ? [items[0]] : []);
+}
+
+function getManagedUploadRemoteUrl(config) {
+  if (!config || !config.remoteUrlInputId) return '';
+  const remoteInput = qs(config.remoteUrlInputId);
+  return remoteInput ? String(remoteInput.value || '').trim() : '';
+}
+
+function setManagedUploadRemoteUrl(config, value) {
+  if (!config || !config.remoteUrlInputId) return;
+  const remoteInput = qs(config.remoteUrlInputId);
+  if (!remoteInput) return;
+  remoteInput.value = value || '';
+  remoteInput.dispatchEvent(new Event('input', { bubbles: true }));
+  remoteInput.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function getManagedUploadLabel(config, files) {
+  if (!config) return '';
+  const remoteItems = getManagedUploadRemoteItems(config);
+  if (!files.length && remoteItems.length > 0) {
+    const kind = config.kind || config.previewKind || 'file';
+    const singleKey = config.selectedSingleKey || (kind === 'image' ? 'upload_selected_image' : kind === 'video' ? 'upload_selected_video' : kind === 'audio' ? 'upload_selected_audio' : 'upload_selected_file');
+    return getI18nText(singleKey, 'Selected file');
+  }
+  const totalItems = files.length + remoteItems.length;
+  if (totalItems === 0) return getI18nText(config.emptyKey, config.emptyFallback || '');
+  const kind = config.kind || config.previewKind || 'file';
+  if (config.multiple) {
+    const multiKey = config.selectedMultiKey || (kind === 'image' ? 'upload_selected_images' : 'upload_selected_files');
+    return getI18nText(multiKey, 'Selected items').replace('{n}', totalItems);
+  }
+  const singleKey = config.selectedSingleKey || (kind === 'image' ? 'upload_selected_image' : kind === 'video' ? 'upload_selected_video' : kind === 'audio' ? 'upload_selected_audio' : 'upload_selected_file');
+  const prefix = getI18nText(singleKey, 'Selected file');
+  const firstItem = remoteItems[0] || files[0];
+  return config.showFileName ? `${prefix}: ${getAssetItemName(firstItem, 'file')}` : prefix;
+}
+
+function cleanupCompactPreviewHost(host) {
+  if (!host) return;
+  if (Array.isArray(host._blobUrls)) {
+    host._blobUrls.forEach((url) => URL.revokeObjectURL(url));
+  }
+  host._blobUrls = [];
+  host.innerHTML = '';
+}
+
+function ensureCompactPreviewHost(inputEl) {
+  if (!inputEl) return null;
+  if (inputEl._compactPreviewHost && inputEl._compactPreviewHost.isConnected) return inputEl._compactPreviewHost;
+  const zone = inputEl.closest('.upload-zone, .upload-area');
+  if (!zone || !zone.parentElement) return null;
+  const selector = `.compact-upload-preview[data-input-id="${inputEl.id}"]`;
+  let host = zone.parentElement.querySelector(selector);
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'compact-upload-preview';
+    host.dataset.inputId = inputEl.id;
+    zone.insertAdjacentElement('afterend', host);
+  }
+  inputEl._compactPreviewHost = host;
+  return host;
+}
+
+function detectPreviewKind(file, config) {
+  if (config && config.previewKind) return config.previewKind;
+  const type = String((file && file.type) || '').toLowerCase();
+  if (type.startsWith('image/')) return 'image';
+  if (type.startsWith('video/')) return 'video';
+  return null;
+}
+
+function renderCompactPreviewForInput(inputEl, config) {
+  if (!inputEl || !config) return;
+  const host = ensureCompactPreviewHost(inputEl);
+  if (!host) return;
+  cleanupCompactPreviewHost(host);
+
+  const files = getManagedUploadFiles(config);
+  const remoteItems = getManagedUploadRemoteItems(config);
+  if (!files.length && !remoteItems.length) {
+    host.style.display = 'none';
+    return;
+  }
+
+  const previewable = files.some((file) => !!detectPreviewKind(file, config))
+    || remoteItems.some((item) => {
+      const assetType = item && item.assetType ? item.assetType : (config.previewKind || config.kind || '');
+      return assetType === 'image' || assetType === 'video';
+    });
+  if (!previewable) {
+    host.style.display = 'none';
+    return;
+  }
+
+  host.style.display = 'flex';
+  const grid = document.createElement('div');
+  grid.className = 'compact-upload-preview-grid';
+
+  const entries = [
+    ...remoteItems.map((item, index) => ({
+      file: item,
+      index,
+      kind: item && item.assetType ? item.assetType : config.previewKind,
+      isRemote: true,
+      src: item.url,
+    })),
+    ...files.map((file, index) => ({
+      file,
+      index: remoteItems.length + index,
+      kind: detectPreviewKind(file, config),
+      isRemote: false,
+      src: '',
+    })),
+  ];
+
+  entries.forEach((entry) => {
+    const { file, index, kind, isRemote, src } = entry;
+    if (!kind) return;
+
+    const tile = document.createElement('div');
+    tile.className = 'compact-upload-preview-item';
+    tile.title = isRemote ? src : file.name;
+
+    const previewSrc = isRemote ? src : URL.createObjectURL(file);
+    if (!isRemote) host._blobUrls.push(previewSrc);
+
+    if (kind === 'video') {
+      const video = document.createElement('video');
+      video.src = previewSrc;
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.preload = 'metadata';
+      video.addEventListener('loadeddata', () => {
+        try { video.currentTime = Math.min(0.15, video.duration || 0); } catch (_) {}
+        video.play().catch(() => {});
+      }, { once: true });
+      tile.appendChild(video);
+    } else {
+      const img = document.createElement('img');
+      img.src = previewSrc;
+      img.alt = isRemote ? getAssetItemName(file, config.kind || 'asset') : file.name;
+      tile.appendChild(img);
+    }
+
+    if (config.multiple) {
+      const badge = document.createElement('span');
+      badge.className = 'img-num-badge';
+      badge.textContent = index + 1;
+      tile.appendChild(badge);
+    }
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'compact-upload-preview-remove';
+    removeBtn.setAttribute('aria-label', getI18nText('btn_remove', 'Remove'));
+    removeBtn.title = getI18nText('btn_remove', 'Remove');
+    removeBtn.textContent = 'x';
+    removeBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (isRemote) {
+        const nextRemote = config.multiple
+          ? getManagedUploadRemoteItems(config).filter((_, remoteIndex) => remoteIndex !== index)
+          : [];
+        setManagedUploadRemoteItems(config, nextRemote);
+        if (!config.multiple) config.setFiles(null);
+        refreshManagedUploadUi(inputEl);
+        return;
+      }
+      const nextFiles = config.multiple ? files.filter((_, fileIndex) => fileIndex !== index) : [];
+      if (typeof inputEl._assignDroppedFiles === 'function') {
+        inputEl._assignDroppedFiles(nextFiles, { append: false, reason: 'remove' });
+      }
+    });
+    tile.appendChild(removeBtn);
+    grid.appendChild(tile);
+  });
+
+  if (!grid.children.length) {
+    host.style.display = 'none';
+    return;
+  }
+
+  host.appendChild(grid);
+}
+
+function refreshManagedUploadUi(inputEl) {
+  if (!inputEl || !inputEl._uploadConfig) return;
+  const config = inputEl._uploadConfig;
+  const files = getManagedUploadFiles(config);
+  const labelEl = config.labelId ? qs(config.labelId) : null;
+  if (labelEl) labelEl.textContent = getManagedUploadLabel(config, files);
+  renderCompactPreviewForInput(inputEl, config);
+}
+
+function bindManagedUploadInput(inputEl, config) {
+  if (!inputEl || !config) return;
+  inputEl._uploadConfig = { ...config, inputId: config.inputId || inputEl.id, stateKey: config.stateKey || inputEl.id };
+  inputEl._assignDroppedFiles = (files, opts = {}) => {
+    const runtimeConfig = inputEl._uploadConfig;
+    const incoming = Array.from(files || []).filter(Boolean);
+    const nextFiles = runtimeConfig.multiple && opts.append ? [...getManagedUploadFiles(runtimeConfig), ...incoming] : incoming;
+    if (incoming.length && (!opts.append || !runtimeConfig.multiple)) {
+      setManagedUploadRemoteItems(runtimeConfig, runtimeConfig.multiple && opts.append ? getManagedUploadRemoteItems(runtimeConfig) : []);
+    }
+    if (runtimeConfig.multiple) runtimeConfig.setFiles(nextFiles);
+    else runtimeConfig.setFiles(nextFiles[0] || null);
+    refreshManagedUploadUi(inputEl);
+  };
+  if (!inputEl._managedUploadBound) {
+    inputEl._managedUploadBound = true;
+    inputEl.addEventListener('change', (event) => {
+      inputEl._assignDroppedFiles(Array.from(event.target.files || []), { append: false, reason: 'picker' });
+      event.target.value = '';
+    });
+  }
+  if (inputEl._uploadConfig.remoteUrlInputId && !inputEl._managedUploadRemoteBound) {
+    inputEl._managedUploadRemoteBound = true;
+    const remoteInput = qs(inputEl._uploadConfig.remoteUrlInputId);
+    if (remoteInput) {
+      const syncRemotePreview = () => refreshManagedUploadUi(inputEl);
+      remoteInput.addEventListener('input', syncRemotePreview);
+      remoteInput.addEventListener('change', syncRemotePreview);
+    }
+  }
+  refreshManagedUploadUi(inputEl);
+}
+
+function bindManagedUploadById(inputId) {
+  const inputEl = qs(inputId);
+  const config = MANAGED_UPLOADS[inputId];
+  if (inputEl && config) bindManagedUploadInput(inputEl, config);
+}
+
+function refreshAllManagedUploads() {
+  Object.keys(MANAGED_UPLOADS).forEach((inputId) => {
+    const inputEl = qs(inputId);
+    if (inputEl && inputEl._uploadConfig) refreshManagedUploadUi(inputEl);
+  });
+}
+
+function createInternalAssetPayload(item) {
+  if (!item || (item.type !== 'image' && item.type !== 'video')) return null;
+  const meta = item && item.meta && typeof item.meta === 'object' ? item.meta : null;
+  const resolvedUrl = item.type === 'video'
+    ? (meta && (meta.originalDownloadUrl || meta.originalUrl)) || item.modelDownloadUrl || item.url || ''
+    : (meta && (meta.originalUrl || meta.originalDownloadUrl)) || item.url || item.thumbnailUrl || '';
+  if (!resolvedUrl) return null;
+  const fallbackExt = item.type === 'video' ? 'mp4' : 'png';
+  const filename = deriveFilenameFromUrl(resolvedUrl, fallbackExt);
+  return {
+    type: item.type,
+    url: resolvedUrl,
+    filename,
+    mimeHint: inferMimeTypeFromName(filename, item.type === 'video' ? 'video/mp4' : 'image/png'),
+  };
+}
+
+let activeTouchAssetDrag = null;
+const TOUCH_ASSET_DRAG_HOLD_MS = 220;
+const TOUCH_ASSET_DRAG_MOVE_SLOP_PX = 12;
+let touchAssetDragCleanupSuspendUntil = 0;
+
+function suspendTouchAssetDragCleanup(ms = 420) {
+  touchAssetDragCleanupSuspendUntil = Date.now() + Math.max(0, ms);
+}
+
+function removeTouchAssetGhosts() {
+  document.querySelectorAll('.touch-drag-ghost').forEach((ghost) => ghost.remove());
+}
+
+function clearTouchAssetHoverZone() {
+  if (activeTouchAssetDrag && activeTouchAssetDrag.hoverZone) {
+    activeTouchAssetDrag.hoverZone.classList.remove('drag-over');
+    activeTouchAssetDrag.hoverZone = null;
+  }
+}
+
+function flushTouchAssetDragPosition(clientX, clientY) {
+  if (!activeTouchAssetDrag) return;
+  positionTouchAssetGhost(clientX, clientY);
+  const lastHoverX = Number.isFinite(activeTouchAssetDrag.hoverX) ? activeTouchAssetDrag.hoverX : null;
+  const lastHoverY = Number.isFinite(activeTouchAssetDrag.hoverY) ? activeTouchAssetDrag.hoverY : null;
+  if (
+    lastHoverX === null
+    || lastHoverY === null
+    || Math.abs(clientX - lastHoverX) >= 8
+    || Math.abs(clientY - lastHoverY) >= 8
+  ) {
+    activeTouchAssetDrag.hoverX = clientX;
+    activeTouchAssetDrag.hoverY = clientY;
+    updateTouchAssetHoverZone(clientX, clientY);
+  }
+}
+
+function scheduleTouchAssetDragPosition(clientX, clientY) {
+  if (!activeTouchAssetDrag) return;
+  activeTouchAssetDrag.pendingX = clientX;
+  activeTouchAssetDrag.pendingY = clientY;
+  if (activeTouchAssetDrag.moveRaf) return;
+  activeTouchAssetDrag.moveRaf = requestAnimationFrame(() => {
+    if (!activeTouchAssetDrag) return;
+    activeTouchAssetDrag.moveRaf = 0;
+    flushTouchAssetDragPosition(activeTouchAssetDrag.pendingX, activeTouchAssetDrag.pendingY);
+  });
+}
+
+function cleanupTouchAssetDrag() {
+  const dragState = activeTouchAssetDrag;
+  clearTouchAssetHoverZone();
+  if (dragState && dragState.moveRaf) {
+    cancelAnimationFrame(dragState.moveRaf);
+    dragState.moveRaf = 0;
+  }
+  if (activeTouchAssetDrag && activeTouchAssetDrag.ghost && activeTouchAssetDrag.ghost.parentNode) {
+    activeTouchAssetDrag.ghost.parentNode.removeChild(activeTouchAssetDrag.ghost);
+  }
+  activeTouchAssetDrag = null;
+  removeTouchAssetGhosts();
+  document.body.classList.remove('dragging-internal-asset', 'dragging-internal-asset-touch');
+  if (dragState && dragState.deferHistoryDrawerClose) {
+    closeHistoryDrawer();
+  }
+}
+
+function getUploadSurfaceAtPoint(clientX, clientY) {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const hit = document.elementFromPoint(clientX, clientY);
+  if (!hit || typeof hit.closest !== 'function') return null;
+  const surface = hit.closest('.upload-zone, .upload-area');
+  return surface && surface._dropInput ? surface : null;
+}
+
+function updateTouchAssetHoverZone(clientX, clientY) {
+  if (!activeTouchAssetDrag) return null;
+  const nextZone = getUploadSurfaceAtPoint(clientX, clientY);
+  if (activeTouchAssetDrag.hoverZone === nextZone) return nextZone;
+  clearTouchAssetHoverZone();
+  if (nextZone) {
+    nextZone.classList.add('drag-over');
+    activeTouchAssetDrag.hoverZone = nextZone;
+  }
+  return nextZone;
+}
+
+function createTouchAssetGhost(payload) {
+  removeTouchAssetGhosts();
+  const ghost = document.createElement('div');
+  ghost.className = 'touch-drag-ghost';
+  ghost.dataset.assetType = payload.type || 'image';
+  ghost.innerHTML = `<span>${payload.type === 'video' ? 'VIDEO' : 'IMAGE'}</span>`;
+  document.body.appendChild(ghost);
+  return ghost;
+}
+
+function positionTouchAssetGhost(clientX, clientY) {
+  if (!activeTouchAssetDrag || !activeTouchAssetDrag.ghost) return;
+  activeTouchAssetDrag.ghost.style.transform = `translate3d(${clientX}px, ${clientY}px, 0) translate(-50%, -50%)`;
+}
+
+function finishTouchAssetDrag(clientX, clientY) {
+  if (!activeTouchAssetDrag) return;
+  const dragState = activeTouchAssetDrag;
+  const zoneEl = updateTouchAssetHoverZone(clientX, clientY) || dragState.hoverZone;
+  cleanupTouchAssetDrag();
+
+  if (zoneEl && zoneEl._dropInput && dragState.payload) {
+    void applyInternalAssetPayloadToInput(zoneEl._dropInput, dragState.payload, {
+      append: !!zoneEl._dropInput.multiple,
+      zoneEl,
+      reason: 'touch-drop',
+    });
+  }
+}
+
+function setInternalAssetData(dt, payload) {
+  if (!dt || !payload || !payload.url) return;
+  dt.effectAllowed = 'copy';
+  dt.setData(INTERNAL_ASSET_MIME, JSON.stringify(payload));
+  dt.setData('text/uri-list', payload.url);
+  dt.setData('text/plain', payload.url);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) cleanupTouchAssetDrag();
+}, true);
+['pagehide', 'blur'].forEach((eventName) => {
+  window.addEventListener(eventName, () => {
+    cleanupTouchAssetDrag();
+  }, true);
+});
+document.addEventListener('scroll', () => {
+  if (activeTouchAssetDrag) {
+    if (activeTouchAssetDrag.ignoreScrollCleanup || Date.now() < touchAssetDragCleanupSuspendUntil) return;
+    cleanupTouchAssetDrag();
+  }
+}, true);
+document.addEventListener('pointerdown', () => {
+  if (activeTouchAssetDrag) cleanupTouchAssetDrag();
+}, true);
+
+function bindAssetDragSource(el, item, options = {}) {
+  if (!el) return;
+  const payload = createInternalAssetPayload(item);
+  if (el._touchAssetStartHandler) {
+    el.removeEventListener('touchstart', el._touchAssetStartHandler, true);
+    el._touchAssetStartHandler = null;
+  }
+  if (el._touchAssetContextMenuHandler) {
+    el.removeEventListener('contextmenu', el._touchAssetContextMenuHandler, true);
+    el._touchAssetContextMenuHandler = null;
+  }
+  if (!payload) {
+    el.draggable = false;
+    el.classList.remove('draggable-asset');
+    el.classList.remove('drag-source-touch');
+    el.removeAttribute('data-drag-hint');
+    el.removeAttribute('title');
+    el.ondragstart = null;
+    el.ondragend = null;
+    return;
+  }
+  const touchSource = isPrimaryCoarsePointer();
+  const useNativeDrag = !touchSource;
+  el.draggable = useNativeDrag;
+  el.classList.add('draggable-asset');
+  el.classList.toggle('drag-source-touch', touchSource);
+  if (options.badge !== false) {
+    el.setAttribute('data-drag-hint', getI18nText('drag_asset_badge', 'Drag'));
+  }
+  el.title = getI18nText('drag_asset_hint', 'Drag into an upload area');
+  const handleDragStartSideEffects = () => {
+    if (typeof options.onDragStart === 'function') {
+      options.onDragStart();
+    }
+  };
+  const handleTouchDragStartSideEffects = () => {
+    if (typeof options.onTouchDragStart === 'function') {
+      options.onTouchDragStart();
+      return;
+    }
+    handleDragStartSideEffects();
+  };
+  el.ondragstart = useNativeDrag ? (event) => {
+    if (!event.dataTransfer) return;
+    setInternalAssetData(event.dataTransfer, payload);
+    document.body.classList.add('dragging-internal-asset');
+    setTimeout(handleDragStartSideEffects, 0);
+  } : null;
+  el.ondragend = useNativeDrag ? (() => {
+    document.body.classList.remove('dragging-internal-asset');
+    if (typeof options.onDragEnd === 'function') {
+      options.onDragEnd();
+    }
+  }) : null;
+  if (touchSource) {
+    const handleContextMenu = (event) => {
+      event.preventDefault();
+    };
+    el._touchAssetContextMenuHandler = handleContextMenu;
+    el.addEventListener('contextmenu', handleContextMenu, true);
+  }
+  const onTouchStart = (startEvent) => {
+    if (!startEvent.touches || startEvent.touches.length !== 1) return;
+    const startTouch = startEvent.touches[0];
+    const startX = startTouch.clientX;
+    const startY = startTouch.clientY;
+    let activated = false;
+    let pressTimer = null;
+    let latestX = startX;
+    let latestY = startY;
+
+    const clearPressTimer = () => {
+      if (pressTimer) {
+        clearTimeout(pressTimer);
+        pressTimer = null;
+      }
+    };
+
+    const teardown = () => {
+      clearPressTimer();
+      document.removeEventListener('touchmove', handleMove);
+      document.removeEventListener('touchend', handleEnd);
+      document.removeEventListener('touchcancel', handleCancel);
+    };
+
+    const activateTouchDrag = () => {
+      if (activated) return;
+      activated = true;
+      cleanupTouchAssetDrag();
+      activeTouchAssetDrag = {
+        payload,
+        sourceEl: el,
+        hoverZone: null,
+        ghost: createTouchAssetGhost(payload),
+        moveRaf: 0,
+        pendingX: latestX,
+        pendingY: latestY,
+        ignoreScrollCleanup: true,
+      };
+      document.body.classList.add('dragging-internal-asset', 'dragging-internal-asset-touch');
+      flushTouchAssetDragPosition(latestX, latestY);
+      handleTouchDragStartSideEffects();
+      if (navigator.vibrate) navigator.vibrate(10);
+    };
+
+    const handleMove = (moveEvent) => {
+      const touch = moveEvent.touches && moveEvent.touches[0];
+      if (!touch) return;
+      latestX = touch.clientX;
+      latestY = touch.clientY;
+      const distance = Math.hypot(latestX - startX, latestY - startY);
+
+      if (!activated) {
+        if (distance > TOUCH_ASSET_DRAG_MOVE_SLOP_PX) {
+          teardown();
+          cleanupTouchAssetDrag();
+        }
+        return;
+      }
+
+      moveEvent.preventDefault();
+      scheduleTouchAssetDragPosition(latestX, latestY);
+    };
+
+    const handleEnd = (endEvent) => {
+      teardown();
+      if (!activated) return;
+      const touch = (endEvent.changedTouches && endEvent.changedTouches[0]) || startTouch;
+      endEvent.preventDefault();
+      finishTouchAssetDrag(touch.clientX, touch.clientY);
+    };
+
+    const handleCancel = () => {
+      teardown();
+      if (activated) cleanupTouchAssetDrag();
+    };
+
+    pressTimer = setTimeout(activateTouchDrag, touchSource ? 180 : TOUCH_ASSET_DRAG_HOLD_MS);
+    document.addEventListener('touchmove', handleMove, { passive: false });
+    document.addEventListener('touchend', handleEnd, { passive: false });
+    document.addEventListener('touchcancel', handleCancel, { passive: false });
+  };
+  el._touchAssetStartHandler = onTouchStart;
+  el.addEventListener('touchstart', onTouchStart, { passive: false, capture: true });
+}
+async function reuseFromHistory(index) {
   const item = history[index];
   if (!item) return;
 
@@ -366,7 +1841,8 @@ function reuseFromHistory(index) {
   }
 
   // 1. Switch to the correct mode
-  if (ctx.mode) switchMode(ctx.mode);
+  const normalizedMode = ctx.mode === 'kling3' ? 'video' : ctx.mode;
+  if (normalizedMode) switchMode(normalizedMode);
 
   // 2. Restore all select values
   if (ctx.selects) {
@@ -395,17 +1871,33 @@ function reuseFromHistory(index) {
   }
 
   // 5. Navigate to the correct sub-section
-  if (ctx.mode === '3d') {
+  if (normalizedMode === '3d') {
     update3dUiVisibility();
   }
-  if (ctx.mode === 'video') {
-    ensureVideoControls();
-    if (ctx.videoTab) switchVideoTab(ctx.videoTab);
-  }
-  if (ctx.mode === 'kling3') {
-    if (ctx.kling3Family) switchKling3Family(ctx.kling3Family);
-    if (ctx.kling3Tab) switchKling3Tab(ctx.kling3Tab);
-    updateKling3UiVisibility();
+  if (normalizedMode === 'video') {
+    await ensureVideoModelsReady();
+    const desiredVideoTab = ctx.videoTab || getVideoTabForKling3Tab(ctx.kling3Tab);
+    if (desiredVideoTab) switchVideoTab(desiredVideoTab);
+
+    const desiredVideoModelId = ctx.selects && (ctx.selects.videoModel || ctx.selects.kling3Model)
+      ? String(ctx.selects.videoModel || ctx.selects.kling3Model)
+      : '';
+
+    if (desiredVideoModelId && qs('videoModel')) {
+      refreshVideoModelDropdown(desiredVideoModelId);
+      const videoSelect = qs('videoModel');
+      if (videoSelect && Array.from(videoSelect.options || []).some((opt) => opt.value === desiredVideoModelId)) {
+        videoSelect.value = desiredVideoModelId;
+      }
+      if (isKling3VideoModelId(desiredVideoModelId)) {
+        syncKling3StateFromVideoModelId(desiredVideoModelId, { skipSave: true });
+      }
+    } else if (ctx.kling3Tab) {
+      switchKling3Tab(ctx.kling3Tab, { skipSave: true });
+    }
+
+    updateVideoUiVisibility();
+    renderVideoOptionsUI();
   }
 
   // 6. Save restored state
@@ -414,7 +1906,7 @@ function reuseFromHistory(index) {
   // 7. Scroll to the prompt input
   setTimeout(() => {
     const promptArea = qs('promptInput');
-    if (promptArea) promptArea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (promptArea) scrollElementWithinContainer(promptArea, { behavior: 'smooth', block: 'center' });
   }, 150);
 
   showToast(window.I18N ? I18N.t('toast_settings_restored') : 'Settings restored! Ready to generate.');
@@ -536,25 +2028,340 @@ function showToast(message, kind = 'info') {
   }, 2800);
 }
 
-// Toggle history drawer
+// Toggle history / news drawers
 let _historyRendered = false;
+
+function closeHistoryDrawer() {
+  const drawer = qs('historyDrawer');
+  const overlay = qs('drawerOverlay');
+  if (drawer) drawer.classList.remove('drag-hidden');
+  if (overlay) overlay.classList.remove('drag-hidden');
+  if (drawer) drawer.classList.remove('open');
+  if (overlay) overlay.classList.remove('open');
+}
+
+function closeHistoryDrawerDuringTouchDrag() {
+  suspendTouchAssetDragCleanup(420);
+  const drawer = qs('historyDrawer');
+  const overlay = qs('drawerOverlay');
+  if (activeTouchAssetDrag) {
+    activeTouchAssetDrag.deferHistoryDrawerClose = true;
+  }
+  if (drawer) drawer.classList.add('drag-hidden');
+  if (overlay) overlay.classList.add('drag-hidden');
+}
+
+function closeHistoryDrawerDuringNativeDrag() {
+  const drawer = qs('historyDrawer');
+  const overlay = qs('drawerOverlay');
+  if (drawer) drawer.classList.add('drag-hidden');
+  if (overlay) overlay.classList.add('drag-hidden');
+}
+
+function finalizeHistoryDrawerAfterNativeDrag() {
+  closeHistoryDrawer();
+}
+
+function closeNewsDrawer() {
+  const drawer = qs('newsDrawer');
+  const overlay = qs('newsOverlay');
+  if (drawer) drawer.classList.remove('open');
+  if (overlay) overlay.classList.remove('open');
+}
+
 function toggleHistory() {
   const drawer = qs('historyDrawer');
   const overlay = qs('drawerOverlay');
   if (!drawer) return;
-  
-  const isOpen = drawer.classList.contains('open');
-  const opening = !isOpen;
+
+  const opening = !drawer.classList.contains('open');
+  if (opening) closeNewsDrawer();
+
   drawer.classList.toggle('open', opening);
   if (overlay) overlay.classList.toggle('open', opening);
 
-  // Lazy render: build history DOM only when first opened, deferred so animation isn't blocked
+  // Lazy render: build history DOM only when first opened, deferred so animation is not blocked
   if (opening && !_historyRendered) {
     _historyRendered = true;
     requestAnimationFrame(() => updateHistoryUI());
   }
 }
 window.toggleHistory = toggleHistory;
+
+function toggleProfileMenu() {
+  const dropdown = document.getElementById('profileDropdown');
+  const btn = document.getElementById('profileBtn');
+  if (!dropdown || !btn) return;
+  const isOpen = dropdown.classList.contains('open');
+  if (isOpen) {
+    dropdown.classList.remove('open');
+    btn.classList.remove('active');
+  } else {
+    dropdown.classList.add('open');
+    btn.classList.add('active');
+  }
+}
+window.toggleProfileMenu = toggleProfileMenu;
+
+// Close profile dropdown when clicking outside
+document.addEventListener('click', function(e) {
+  const wrap = document.querySelector('.profile-menu-wrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const dropdown = document.getElementById('profileDropdown');
+    const btn = document.getElementById('profileBtn');
+    if (dropdown) dropdown.classList.remove('open');
+    if (btn) btn.classList.remove('active');
+  }
+});
+
+function parseNewsTimestamp(value) {
+  if (!value) return NaN;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  const ts = Date.parse(String(value));
+  return Number.isFinite(ts) ? ts : NaN;
+}
+
+function getVideoTabForModelKind(kind) {
+  const k = String(kind || '').trim();
+  if (!k) return null;
+  if (k === 'kling3-text-to-video') return 'text-to-video';
+  if (k === 'kling3-image-to-video') return 'image-to-video';
+  if (k === 'kling3-reference-to-video') return 'reference-to-video';
+  if (k === 'kling3-video-to-video' || k === 'kling3-motion-control') return 'video-to-video';
+  if (k === 'text-to-video') return 'text-to-video';
+  if (k === 'image-to-video') return 'image-to-video';
+  if (k === 'audio-to-video') return 'audio-to-video';
+  if (k === 'reference-to-video') return 'reference-to-video';
+  if (k === 'video-to-video' || k === 'motion-control' || k === 'video-id-to-video') return 'video-to-video';
+  return null;
+}
+
+function collectModelNewsEntries() {
+  const map = new Map();
+
+  function pushEntry(model, meta) {
+    if (!model || !model.id) return;
+    const addedAt = parseNewsTimestamp(model.addedAt);
+    if (!Number.isFinite(addedAt)) return;
+
+    const mode = meta && meta.mode ? meta.mode : '';
+    const key = `${mode}:${model.id}`;
+    const next = {
+      id: model.id,
+      label: model.label || model.id,
+      addedAt,
+      mode,
+      selectId: meta && meta.selectId ? meta.selectId : null,
+      videoTab: meta && meta.videoTab ? meta.videoTab : null,
+      kling3Tab: meta && meta.kling3Tab ? meta.kling3Tab : null,
+      kling3Family: meta && meta.kling3Family ? meta.kling3Family : null,
+      newsDescription: model.newsDescription || '',
+      newsDescriptionKey: model.newsDescriptionKey || null,
+    };
+
+    const prev = map.get(key);
+    if (!prev || next.addedAt >= prev.addedAt) {
+      map.set(key, next);
+    }
+  }
+
+  for (const m of IMAGE_MODELS_TEXT) {
+    pushEntry(m, { mode: 'text', selectId: 'imageModelText' });
+  }
+  for (const m of IMAGE_MODELS_EDIT) {
+    pushEntry(m, { mode: 'image', selectId: 'imageModelEdit' });
+  }
+  for (const m of THREE_D_MODELS) {
+    pushEntry(m, { mode: '3d', selectId: 'threeDModel' });
+  }
+
+  for (const [tab, models] of Object.entries(KLING3_MODELS)) {
+    const videoTab = getVideoTabForKling3Tab(tab);
+    if (!videoTab) continue;
+    for (const m of models || []) {
+      pushEntry(m, {
+        mode: 'video',
+        selectId: 'videoModel',
+        videoTab,
+        kling3Tab: tab,
+        kling3Family: getKling3FamilyForTab(tab),
+      });
+    }
+  }
+
+  for (const m of VIDEO_MODELS) {
+    const videoTab = getVideoTabForModelKind(m.kind);
+    if (!videoTab) continue;
+    pushEntry(m, {
+      mode: 'video',
+      selectId: 'videoModel',
+      videoTab,
+    });
+  }
+
+  return Array.from(map.values()).sort((a, b) => b.addedAt - a.addedAt);
+}
+
+function getRecentModelNewsEntries() {
+  const now = Date.now();
+  const cutoff = now - NEWS_WINDOW_MS;
+  return collectModelNewsEntries().filter((item) => item.addedAt >= cutoff && item.addedAt <= now);
+}
+
+function resolveModelNewsDescription(item) {
+  if (!item) return '';
+  if (item.newsDescriptionKey && window.I18N) {
+    const translated = I18N.t(item.newsDescriptionKey);
+    if (translated && translated !== item.newsDescriptionKey) return translated;
+  }
+  return item.newsDescription || '';
+}
+
+function updateNewsBadge(items) {
+  const badge = qs('newsBadge');
+  const profileBadge = document.getElementById('profileBadge');
+  const count = Array.isArray(items) ? items.length : 0;
+  if (badge) {
+    if (count > 0) {
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.style.display = 'inline-flex';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+  if (profileBadge) {
+    profileBadge.style.display = count > 0 ? 'block' : 'none';
+  }
+}
+
+function renderModelNews(itemsArg = null) {
+  const list = qs('newsList');
+  const empty = qs('emptyNews');
+  if (!list || !empty) return;
+
+  const items = Array.isArray(itemsArg) ? itemsArg : getRecentModelNewsEntries();
+  updateNewsBadge(items);
+
+  list.innerHTML = '';
+  if (items.length === 0) {
+    list.style.display = 'none';
+    empty.style.display = 'flex';
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      requestAnimationFrame(() => window.lucide.createIcons());
+    }
+    return;
+  }
+
+  list.style.display = 'flex';
+  empty.style.display = 'none';
+
+  for (const item of items) {
+    const card = document.createElement('article');
+    card.className = 'news-card';
+
+    const head = document.createElement('div');
+    head.className = 'news-card-head';
+
+    const title = document.createElement('h4');
+    title.className = 'news-card-title';
+    title.textContent = item.label;
+
+    const date = document.createElement('span');
+    date.className = 'news-card-date';
+    date.textContent = new Date(item.addedAt).toLocaleDateString(window.I18N ? I18N.lang : undefined, {
+      month: 'short',
+      day: 'numeric',
+    });
+
+    head.appendChild(title);
+    head.appendChild(date);
+
+    const desc = document.createElement('p');
+    desc.className = 'news-card-desc';
+    desc.textContent = resolveModelNewsDescription(item);
+
+    const actionBtn = document.createElement('button');
+    actionBtn.type = 'button';
+    actionBtn.className = 'news-open-btn';
+    const openModelLabel = window.I18N ? I18N.t('news_open_model') : 'Open model';
+    actionBtn.innerHTML = `<span>${escapeHtml(openModelLabel)}</span><i data-lucide="arrow-up-right"></i>`;
+    actionBtn.addEventListener('click', () => { void openNewsModel(item); });
+
+    card.appendChild(head);
+    card.appendChild(desc);
+    card.appendChild(actionBtn);
+    list.appendChild(card);
+  }
+
+  if (window.lucide && typeof window.lucide.createIcons === 'function') {
+    requestAnimationFrame(() => window.lucide.createIcons());
+  }
+}
+window.renderModelNews = renderModelNews;
+
+function refreshModelNews(forceRender = false) {
+  const items = getRecentModelNewsEntries();
+  const drawer = qs('newsDrawer');
+  const shouldRender = forceRender || (drawer && drawer.classList.contains('open'));
+  if (shouldRender) {
+    renderModelNews(items);
+  } else {
+    updateNewsBadge(items);
+  }
+}
+
+async function openNewsModel(item) {
+  if (!item || !item.mode) return;
+
+  if (item.mode === 'kling3' || item.mode === 'video') {
+    switchMode('video');
+    await ensureVideoModelsReady();
+    const desiredVideoTab = item.videoTab || getVideoTabForKling3Tab(item.kling3Tab);
+    if (desiredVideoTab) switchVideoTab(desiredVideoTab);
+    if (item.kling3Tab) {
+      switchKling3Tab(item.kling3Tab, {
+        preferredModelId: item.id,
+        skipSave: true,
+      });
+    }
+  } else {
+    switchMode(item.mode);
+  }
+
+  const modelSelect = item.selectId ? qs(item.selectId) : null;
+  if (modelSelect) {
+    const hasOption = Array.from(modelSelect.options || []).some((opt) => opt.value === item.id);
+    if (hasOption) {
+      modelSelect.value = item.id;
+      modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    setTimeout(() => {
+      const scrollTarget = modelSelect.closest('.field') || modelSelect;
+      if (scrollTarget && typeof scrollTarget.scrollIntoView === 'function') {
+        scrollElementWithinContainer(scrollTarget, { behavior: 'smooth', block: 'center' });
+      }
+    }, 120);
+  }
+
+  closeNewsDrawer();
+}
+window.openNewsModel = openNewsModel;
+
+function toggleNews() {
+  const drawer = qs('newsDrawer');
+  const overlay = qs('newsOverlay');
+  if (!drawer) return;
+
+  const opening = !drawer.classList.contains('open');
+  if (opening) closeHistoryDrawer();
+
+  drawer.classList.toggle('open', opening);
+  if (overlay) overlay.classList.toggle('open', opening);
+
+  refreshModelNews(opening);
+}
+window.toggleNews = toggleNews;
 
 // Open fullscreen preview
 function openFullscreen() {
@@ -573,6 +2380,7 @@ function substituteImageRefs(text) {
 function updateImagePreview() {
   const grid = qs('imagePreviewGrid');
   if (!grid) return;
+  clearPreviewBlobUrls(grid);
 
   const max = editMaxImages();
 
@@ -599,8 +2407,8 @@ function updateImagePreview() {
     item.className = 'upload-preview-item';
 
     const img = document.createElement('img');
-    img.src = URL.createObjectURL(file);
-    img.alt = file.name;
+    img.src = getPreviewSrcForAssetItem(file, grid);
+    img.alt = getAssetItemName(file, 'image');
     item.appendChild(img);
 
     // Number badge
@@ -647,24 +2455,130 @@ function _updateEditDropzoneHint(max) {
   }
 }
 
+function compactHistoryItemForStorage(item) {
+  if (!item || typeof item !== 'object') return item;
+  const copy = { ...normalizeHistoryItemForRuntime({ ...item, meta: item.meta && typeof item.meta === 'object' ? { ...item.meta } : item.meta }) };
+  delete copy.__accountPersistQueued;
+  if (copy.thumbnailUrl && copy.thumbnailUrl === copy.url) delete copy.thumbnailUrl;
+  if (copy.thumbnailUrl && /^data:image\//i.test(String(copy.thumbnailUrl))) delete copy.thumbnailUrl;
+  if (copy.thumbnailUrl && String(copy.thumbnailUrl).length > 2048) delete copy.thumbnailUrl;
+  return copy;
+}
+
 function saveHistory() {
-  const key = 'nano_history';
+  const key = getScopedStorageKey('nano_history');
+  history = dedupeHistoryItems(history).map((item) => {
+    if (!item || typeof item !== 'object') return item;
+    delete item.__accountPersistQueued;
+    return normalizeHistoryItemForRuntime(item);
+  });
+
+  let persistedHistory = history.slice(0, LOCAL_HISTORY_CACHE_LIMIT).map((item) => compactHistoryItemForStorage(item));
   try {
-    localStorage.setItem(key, JSON.stringify(history));
+    localStorage.setItem(key, JSON.stringify(persistedHistory));
+    persistHistoryCacheMeta(history, undefined, { persistedCount: persistedHistory.length });
   } catch (e) {
-    // localStorage quota exceeded – trim oldest items until it fits
-    while (history.length > 1) {
-      history.pop();
+    while (persistedHistory.length > 1) {
+      persistedHistory.pop();
       try {
-        localStorage.setItem(key, JSON.stringify(history));
+        localStorage.setItem(key, JSON.stringify(persistedHistory));
+        persistHistoryCacheMeta(history, undefined, { persistedCount: persistedHistory.length });
         return;
       } catch (_) { /* keep trimming */ }
     }
+    persistHistoryCacheMeta(history, undefined, { persistedCount: persistedHistory.length });
   }
 }
 
+const TASK_STORAGE_FAILED_RETENTION_MS = 15 * 60 * 1000;
+const TASK_STORAGE_MAX_TERMINAL = 20;
+
+function isTaskActiveForStorage(task) {
+  return !!(task && (task.status === 'QUEUED' || task.status === 'SUBMITTING' || task.status === 'RUNNING'));
+}
+
+function shouldPersistTask(task, now = Date.now()) {
+  if (!task || !task.id) return false;
+  if (isTaskActiveForStorage(task)) return true;
+  if (task.status === 'COMPLETED') return !task.savedToHistory;
+  if (task.status === 'FAILED') {
+    const failedAge = Math.max(0, now - (task.failedAt || task.createdAt || now));
+    return failedAge <= TASK_STORAGE_FAILED_RETENTION_MS;
+  }
+  return false;
+}
+
+function compactTaskForStorage(task) {
+  if (!task || typeof task !== 'object') return null;
+  const compact = {
+    id: task.id,
+    mode: task.mode,
+    prompt: task.prompt || '',
+    model_id: task.model_id || null,
+    status: task.status || null,
+    createdAt: task.createdAt || null,
+    startedAt: task.startedAt || null,
+    completedAt: task.completedAt || null,
+    failedAt: task.failedAt || null,
+    status_url: task.status_url || null,
+    response_url: task.response_url || null,
+    error: task.error || null,
+    retryCount: Number.isFinite(Number(task.retryCount)) ? Number(task.retryCount) : 0,
+    savedToHistory: !!task.savedToHistory,
+  };
+
+  if (task.status === 'COMPLETED' && !task.savedToHistory) {
+    compact.mediaUrl = task.mediaUrl || null;
+    compact.thumbUrl = task.thumbUrl || null;
+    compact.model_urls = task.model_urls || null;
+    compact.modelFormat = task.modelFormat || null;
+  }
+
+  if (isTaskActiveForStorage(task)) {
+    compact.genCtx = task.genCtx || null;
+  }
+
+  return compact;
+}
+
+function buildPersistedTasksSnapshot() {
+  const now = Date.now();
+  const active = [];
+  const terminal = [];
+
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    if (!shouldPersistTask(task, now)) continue;
+    if (isTaskActiveForStorage(task) || (task.status === 'COMPLETED' && !task.savedToHistory)) active.push(task);
+    else terminal.push(task);
+  }
+
+  terminal.sort((a, b) => {
+    const at = Number(a && (a.failedAt || a.createdAt || 0)) || 0;
+    const bt = Number(b && (b.failedAt || b.createdAt || 0)) || 0;
+    return bt - at;
+  });
+
+  const keptTasks = [...active, ...terminal.slice(0, TASK_STORAGE_MAX_TERMINAL)];
+  return keptTasks.map(compactTaskForStorage).filter(Boolean);
+}
+
 function saveTasks() {
-  localStorage.setItem('nano_tasks', JSON.stringify(tasks));
+  const key = getScopedStorageKey('nano_tasks');
+  const persistedTasks = buildPersistedTasksSnapshot();
+
+  if (persistedTasks.length !== tasks.length) {
+    const persistedIds = new Set(persistedTasks.map((task) => task.id));
+    tasks = tasks.filter((task) => task && persistedIds.has(task.id));
+  }
+
+  try {
+    localStorage.setItem(key, JSON.stringify(persistedTasks));
+  } catch (error) {
+    const activeOnly = persistedTasks.filter((task) => isTaskActiveForStorage(task) || (task.status === 'COMPLETED' && !task.savedToHistory));
+    tasks = tasks.filter((task) => task && activeOnly.some((entry) => entry.id === task.id));
+    localStorage.setItem(key, JSON.stringify(activeOnly));
+    console.warn('Task storage quota exceeded; pruned terminal tasks from local cache', error);
+  }
 }
 
 function isTransientPollError(err) {
@@ -693,21 +2607,194 @@ function schedulePoll(taskId, delayMs) {
   pollTimers.set(taskId, h);
 }
 
+function parseJsonMaybe(raw) {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  if (!text) return null;
+  if (!text.startsWith('{') && !text.startsWith('[')) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function extractDetailMessage(details) {
+  const src = typeof details === 'string' ? (parseJsonMaybe(details) || details) : details;
+  if (!src) return '';
+
+  if (typeof src === 'string') {
+    return src.trim();
+  }
+
+  if (Array.isArray(src)) {
+    for (const entry of src) {
+      const msg = extractDetailMessage(entry);
+      if (msg) return msg;
+    }
+    return '';
+  }
+
+  if (typeof src !== 'object') return '';
+
+  if (Array.isArray(src.detail)) {
+    for (const entry of src.detail) {
+      if (entry && typeof entry === 'object') {
+        const msg = (typeof entry.msg === 'string' ? entry.msg.trim() : '') ||
+          (typeof entry.message === 'string' ? entry.message.trim() : '');
+        if (msg) return msg;
+      }
+      const nested = extractDetailMessage(entry);
+      if (nested) return nested;
+    }
+  }
+
+  if (typeof src.msg === 'string' && src.msg.trim()) return src.msg.trim();
+  if (typeof src.message === 'string' && src.message.trim()) return src.message.trim();
+  if (typeof src.error === 'string' && src.error.trim()) return src.error.trim();
+
+  if (src.details) return extractDetailMessage(src.details);
+  if (src.detail) return extractDetailMessage(src.detail);
+
+  return '';
+}
+
+function i18nText(key, fallback) {
+  if (window.I18N && typeof I18N.t === 'function') {
+    const translated = I18N.t(key);
+    if (translated && translated !== key) return translated;
+  }
+  return fallback;
+}
+
+function localizeErrorLine(line) {
+  const src = String(line || '').trim();
+  if (!src) return '';
+
+  if (/^generation failed$/i.test(src)) return i18nText('err_generation_failed', 'Generation failed');
+  if (/^request expired or invalid/i.test(src)) return i18nText('err_expired', 'Request expired or invalid. Please re-generate.');
+  if (/^connection lost after multiple retries/i.test(src)) return i18nText('err_connection_lost', 'Connection lost after multiple retries. Please try again.');
+  if (/^temporary connection issue\. retrying/i.test(src)) return i18nText('err_retrying_connection', 'Temporary connection issue. Retrying…');
+  if (/^task expired after being active too long/i.test(src)) return i18nText('err_task_expired', 'Task expired after being active too long. Please try again.');
+  if (/^interrupted - please try again$/i.test(src)) return i18nText('err_interrupted', 'Interrupted - please try again');
+  if (/video duration can(?:not| not)?(?: be)? longer than 30s/i.test(src)) {
+    return i18nText('err_kling_duration_limit_video', 'Video duration cannot be longer than 30s.');
+  }
+  if (/video duration can(?:not| not)?(?: be)? longer than 10s/i.test(src)) {
+    return i18nText('err_kling_duration_limit_image', 'Video duration cannot be longer than 10s when orientation is image.');
+  }
+  if (/element binding is only supported when character_orientation is ['\"]video['\"]/i.test(src)) {
+    return i18nText('err_kling_element_video_only', "Element binding works only when Character Orientation is set to 'Video'.");
+  }
+  if (/only 1 element is supported/i.test(src) || /supports only one element/i.test(src)) {
+    return i18nText('err_kling_one_element_only', 'Only one element is supported for Kling 3 motion-control.');
+  }
+  return src;
+}
+
+function formatErrorForDisplay(message) {
+  const raw = String(message || '').trim();
+  if (!raw) return '';
+
+  const lines = raw
+    .split(/\n+/)
+    .map((line) => localizeErrorLine(line))
+    .filter(Boolean);
+
+  let output = lines.join('\n');
+  if (/video duration can(?:not| not)?(?: be)? longer than 30s/i.test(raw)) {
+    const tip = i18nText(
+      'err_kling_motion_duration_tip',
+      "Tip: Motion-control videos must be <= 30s with orientation 'video' (<= 10s with orientation 'image')."
+    );
+    if (!output.includes(tip)) output += '\n' + tip;
+  }
+
+  return output;
+}
+
+function getTaskStatusLabel(status) {
+  const keyMap = {
+    QUEUED: 'task_status_queued',
+    SUBMITTING: 'task_status_submitting',
+    RUNNING: 'task_status_running',
+    FAILED: 'task_status_failed',
+    COMPLETED: 'task_status_completed',
+  };
+  const fallbackMap = {
+    QUEUED: 'Queued',
+    SUBMITTING: 'Submitting',
+    RUNNING: 'Running',
+    FAILED: 'Failed',
+    COMPLETED: 'Completed',
+  };
+  const s = String(status || '').toUpperCase();
+  const key = keyMap[s];
+  if (!key) return status || '';
+  return i18nText(key, fallbackMap[s] || s);
+}
+
+function normalizeErrorMessageFromPayload(payload, fallbackMessage = '') {
+  const src = typeof payload === 'string' ? (parseJsonMaybe(payload) || { error: payload }) : payload;
+  const primary = src && typeof src === 'object'
+    ? ((typeof src.error === 'string' && src.error.trim()) ? src.error.trim() :
+      ((typeof src.message === 'string' && src.message.trim()) ? src.message.trim() : ''))
+    : '';
+
+  const detail = extractDetailMessage(src && typeof src === 'object' ? (src.details || src.detail) : src);
+
+  const isGeneric = !primary || /status check failed:/i.test(primary) || /unprocessable entity/i.test(primary) || /^generation failed$/i.test(primary);
+
+  let message = primary;
+  if (isGeneric && detail) {
+    message = detail;
+  } else if (detail && primary && !primary.toLowerCase().includes(detail.toLowerCase())) {
+    message = primary + '\n' + detail;
+  }
+
+  if (!message) {
+    message = fallbackMessage || 'Generation failed';
+  }
+
+  return message;
+}
+
+function getErrorMessage(error, fallbackMessage = '') {
+  if (error && typeof error === 'object') {
+    if (error.__payload) return normalizeErrorMessageFromPayload(error.__payload, fallbackMessage || error.message || '');
+    if (typeof error.message === 'string') return normalizeErrorMessageFromPayload(error.message, fallbackMessage);
+    return normalizeErrorMessageFromPayload(error, fallbackMessage);
+  }
+  return normalizeErrorMessageFromPayload(error, fallbackMessage);
+}
+
+async function createResponseError(res, fallbackPrefix = 'Request failed') {
+  let rawText = '';
+  try {
+    rawText = await res.text();
+  } catch {
+    rawText = '';
+  }
+
+  const parsed = parseJsonMaybe(rawText);
+  const payload = parsed || (rawText ? { error: rawText } : { error: fallbackPrefix + ': ' + res.status + ' ' + res.statusText });
+  const fallbackMessage = fallbackPrefix + ': ' + res.status + ' ' + res.statusText;
+
+  const err = new Error(normalizeErrorMessageFromPayload(payload, fallbackMessage));
+  err.__httpStatus = res.status;
+  err.__payload = payload;
+  err.__transient = res.status === 429 || res.status >= 500;
+  return err;
+}
+
+async function ensureOkJsonResponse(res, fallbackPrefix = 'Request failed') {
+  if (!res.ok) throw await createResponseError(res, fallbackPrefix);
+  return await res.json();
+}
+
 async function fetchFalViaStatusProxy(url) {
   const res = await fetch(`/api/status?statusUrl=${encodeURIComponent(url)}`);
-  if (!res.ok) {
-    const text = await res.text();
-    if (res.status === 422) {
-      const err = new Error('Request expired or invalid. Please re-generate.');
-      err.__httpStatus = 422;
-      throw err;
-    }
-    const err = new Error(text);
-    err.__transient = res.status === 429 || res.status >= 500;
-    err.__httpStatus = res.status;
-    throw err;
-  }
-  return await res.json();
+  return await ensureOkJsonResponse(res, 'Status check failed');
 }
 
 function getActiveTaskCount() {
@@ -751,19 +2838,40 @@ let VIDEO_OPTION_DEFS = {};
 
 async function loadVideoModels() {
   if (videoModelsLoaded) return;
-  const res = await fetch('/api/video-generate');
-  if (!res.ok) throw new Error(await res.text());
-  const json = await res.json();
-  const models = Array.isArray(json && json.models) ? json.models : [];
-  VIDEO_MODELS = models.map((m) => ({ id: m.id, label: m.label || m.id, kind: m.kind || '' }));
-  VIDEO_MODEL_MAP = new Map(models.map((m) => [m.id, m]));
-  VIDEO_OPTION_DEFS = (json && json.optionDefs) ? json.optionDefs : {};
-  videoModelsLoaded = true;
+  if (!videoModelsPromise) {
+    videoModelsPromise = (async () => {
+      const res = await fetch('/api/video-generate');
+      if (!res.ok) throw await createResponseError(res, 'Failed to load video models');
+      const json = await res.json();
+      const models = Array.isArray(json && json.models) ? json.models : [];
+      VIDEO_MODELS = models.map((m) => ({
+        id: m.id,
+        label: m.label || m.id,
+        kind: m.kind || '',
+        addedAt: m.addedAt || null,
+        newsDescription: m.newsDescription || '',
+        newsDescriptionKey: m.newsDescriptionKey || null,
+      }));
+      VIDEO_MODEL_MAP = new Map(models.map((m) => [m.id, m]));
+      VIDEO_OPTION_DEFS = (json && json.optionDefs) ? json.optionDefs : {};
+      videoModelsLoaded = true;
+      refreshModelNews();
+    })().finally(() => {
+      videoModelsPromise = null;
+    });
+  }
+  await videoModelsPromise;
 }
 
 function getSelectedVideoModel() {
   const id = qs('videoModel') ? qs('videoModel').value : '';
   return id ? (VIDEO_MODEL_MAP.get(id) || null) : null;
+}
+
+function getVideoFamilyPriority(model) {
+  if (model && model.kind && isKling3VideoKind(model.kind)) return 0;
+  if (model && model.id && isLtx23VideoModelId(model.id)) return 1;
+  return 2;
 }
 
 function getVideoModelsForTab(tab) {
@@ -772,22 +2880,187 @@ function getVideoModelsForTab(tab) {
 
   return VIDEO_MODELS.filter((m) => {
     const k = m && m.kind ? m.kind : '';
-    if (k === t) return true;
-    if (t === 'video-to-video' && (k === 'motion-control' || k === 'video-id-to-video')) return true;
-    return false;
+    return getVideoTabForModelKind(k) === t;
+  }).sort((a, b) => {
+    const familyDiff = getVideoFamilyPriority(a) - getVideoFamilyPriority(b);
+    if (familyDiff !== 0) return familyDiff;
+    return 0;
   });
 }
 
-function refreshVideoModelDropdown() {
+function refreshVideoModelDropdown(preferredId = '') {
   const sel = qs('videoModel');
   if (!sel) return;
   const prev = sel.value;
   const items = getVideoModelsForTab(currentVideoTab);
   setSelectOptions(sel, items);
-  if (!sel.value && items[0]) sel.value = items[0].id;
-  if (prev && Array.isArray(items) && items.some((m) => m.id === prev)) {
+  if (preferredId && Array.isArray(items) && items.some((m) => m.id === preferredId)) {
+    sel.value = preferredId;
+  } else if (prev && Array.isArray(items) && items.some((m) => m.id === prev)) {
     sel.value = prev;
+  } else if (!sel.value && items[0]) {
+    sel.value = items[0].id;
   }
+}
+
+function getLtx23ModelsForFamily(family) {
+  return LTX23_MODELS[family] || [];
+}
+
+function refreshLtx23ModelDropdown(preferredId = '') {
+  const sel = qs('ltx23Model');
+  if (!sel) return;
+  const prev = sel.value;
+  const items = getLtx23ModelsForFamily(currentLtx23Family);
+  setSelectOptions(sel, items);
+  const remembered = ltx23SelectedModelByFamily[currentLtx23Family];
+  if (preferredId && Array.isArray(items) && items.some((m) => m.id === preferredId)) {
+    sel.value = preferredId;
+  } else if (remembered && Array.isArray(items) && items.some((m) => m.id === remembered)) {
+    sel.value = remembered;
+  } else if (prev && Array.isArray(items) && items.some((m) => m.id === prev)) {
+    sel.value = prev;
+  } else if (items[0]) {
+    sel.value = items[0].id;
+  }
+}
+
+function renderLtx23VariantTabs(preferredId = '') {
+  const host = qs('ltx23VariantTabs');
+  if (!host) return;
+  const models = getLtx23ModelsForFamily(currentLtx23Family);
+  const activeId = getSelectedLtx23ModelId(preferredId) || ltx23SelectedModelByFamily[currentLtx23Family] || (models[0] && models[0].id) || '';
+  host.innerHTML = models.map((model) => `
+    <button class="sub-tab ${model.id === activeId ? 'active' : ''}" type="button" onclick="selectLtx23Model('${model.id}')">
+      ${escapeHtml(model.label)}
+    </button>
+  `).join('');
+}
+
+function syncLtx23FamilyButtons() {
+  const familyIds = {
+    'text-to-video': 'ltx23family-text',
+    'image-to-video': 'ltx23family-image',
+    'video-to-video': 'ltx23family-video',
+    'audio-to-video': 'ltx23family-audio',
+  };
+  Object.entries(familyIds).forEach(([family, id]) => {
+    const el = qs(id);
+    if (el) el.classList.toggle('active', family === currentLtx23Family);
+  });
+}
+
+function ensureLtx23EmbeddedSection() {
+  const videoHost = qs('videoUploadGroup');
+  const ltxSection = qs('ltx23UploadGroup');
+  if (!videoHost || !ltxSection) return;
+
+  const videoControls = qs('videoControls');
+  const desiredInsertBefore = videoControls && videoControls.nextSibling ? videoControls.nextSibling : null;
+  if (ltxSection.parentElement !== videoHost) {
+    if (desiredInsertBefore) videoHost.insertBefore(ltxSection, desiredInsertBefore);
+    else videoHost.appendChild(ltxSection);
+  } else if (videoControls && ltxSection.previousElementSibling !== videoControls) {
+    if (desiredInsertBefore && desiredInsertBefore !== ltxSection) {
+      videoHost.insertBefore(ltxSection, desiredInsertBefore);
+    } else {
+      videoHost.appendChild(ltxSection);
+    }
+  }
+
+  ltxSection.classList.add('video-ltx-embedded');
+  if (ltxSection.dataset.ready !== 'true') {
+    const ltxModelSel = qs('ltx23Model');
+    if (ltxModelSel) {
+      ltxModelSel.addEventListener('change', () => {
+        if (ltxModelSel.value) selectLtx23Model(ltxModelSel.value);
+      });
+    }
+    ltxSection.dataset.ready = 'true';
+  }
+  syncLtx23FamilyButtons();
+  refreshLtx23ModelDropdown();
+  renderLtx23VariantTabs();
+}
+
+function syncLtx23StateFromVideoModelId(modelId, options = {}) {
+  const family = getLtx23FamilyForModelId(modelId);
+  if (!family) return false;
+  currentLtx23Family = family;
+  ltx23SelectedModelByFamily[family] = modelId;
+  ensureLtx23EmbeddedSection();
+  syncLtx23FamilyButtons();
+  refreshLtx23ModelDropdown(modelId);
+  renderLtx23VariantTabs(modelId);
+  if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
+  return true;
+}
+
+function selectLtx23Model(modelId, options = {}) {
+  const family = getLtx23FamilyForModelId(modelId);
+  if (!family) return;
+  currentLtx23Family = family;
+  ltx23SelectedModelByFamily[family] = modelId;
+  if (currentVideoTab !== family) {
+    currentVideoTab = family;
+    setActiveVideoTabButtonState(currentVideoTab);
+  }
+  refreshVideoModelDropdown(modelId);
+  refreshLtx23ModelDropdown(modelId);
+  const videoSel = qs('videoModel');
+  if (videoSel) videoSel.value = modelId;
+  ensureLtx23EmbeddedSection();
+  updateVideoUiVisibility();
+  renderVideoOptionsUI();
+  if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
+}
+window.selectLtx23Model = selectLtx23Model;
+
+function switchLtx23Family(family, options = {}) {
+  if (!LTX23_MODELS[family]) return;
+  currentLtx23Family = family;
+  const remembered = ltx23SelectedModelByFamily[family];
+  const models = getLtx23ModelsForFamily(family);
+  const preferredId = (options.preferredModelId && isLtx23VideoModelId(options.preferredModelId))
+    ? options.preferredModelId
+    : (remembered || (models[0] && models[0].id) || '');
+  selectLtx23Model(preferredId, options);
+}
+window.switchLtx23Family = switchLtx23Family;
+
+function ensureKling3EmbeddedSection() {
+  const videoHost = qs('videoUploadGroup');
+  const klingSection = qs('kling3UploadGroup');
+  if (!videoHost || !klingSection) return;
+
+  if (klingSection.parentElement !== videoHost) {
+    videoHost.appendChild(klingSection);
+  }
+
+  klingSection.classList.add('video-kling-embedded');
+  klingSection.style.marginTop = '0.75rem';
+
+  const klingModelRow = qs('kling3Model') ? qs('kling3Model').closest('.settings-row') : null;
+  if (klingModelRow) klingModelRow.style.display = 'none';
+
+  if (!kling3ControlsInitialized) {
+    initKling3Controls();
+    kling3ControlsInitialized = true;
+  }
+
+  if (klingSection.dataset.embeddedReady !== 'true') {
+    switchKling3Tab(currentKling3Tab, {
+      skipVideoSelectionSync: true,
+      skipSave: true,
+      preferredModelId: getSelectedKling3ModelId(),
+    });
+    klingSection.dataset.embeddedReady = 'true';
+  }
+}
+
+async function ensureVideoModelsReady() {
+  ensureVideoControls();
+  await loadVideoModels();
 }
 
 function coerceBoolFromUi(v) {
@@ -798,27 +3071,195 @@ function coerceBoolFromUi(v) {
   return null;
 }
 
+const VIDEO_OPTION_LABEL_KEYS = {
+  acceleration: 'label_acceleration',
+  adjust_fps_for_interpolation: 'label_adjust_fps_for_interpolation',
+  audio_url: 'label_audio_url',
+  auto_fix: 'label_auto_fix_prompt',
+  camera_fixed: 'label_fixed_camera',
+  cfg_scale: 'label_cfg_scale',
+  cfg_scale_framepack: 'label_cfg_scale',
+  character_orientation: 'label_character_orientation_mode',
+  character_orientation_kling3_motion: 'label_character_orientation_mode',
+  delete_video: 'label_delete_after',
+  detect_and_block_ip: 'label_block_ip_content',
+  effect_pixverse: 'label_effect',
+  enable_output_safety_checker_off: 'label_output_safety',
+  enable_prompt_expansion: 'label_expand_prompt',
+  enable_prompt_expansion_on: 'label_expand_prompt',
+  enable_safety_checker: 'label_safety_check',
+  enable_safety_checker_off: 'label_safety_check',
+  first_n_seconds: 'label_source_seconds',
+  fps_animatediff: 'label_fps',
+  fps_ltx2: 'label_fps',
+  fps_ltx23: 'label_fps',
+  frames_per_second: 'label_frames_per_second',
+  generate_audio: 'label_generate_audio',
+  generate_audio_on: 'label_generate_audio',
+  generate_audio_switch: 'label_generate_audio',
+  generate_multi_clip_switch: 'label_multi_clip',
+  guidance_scale_2: 'label_guidance_scale_2',
+  guidance_scale_animatediff: 'label_guidance_scale',
+  guidance_scale_framepack: 'label_guidance_scale',
+  guidance_scale_ltx23_audio: 'label_guidance_scale',
+  guidance_scale_ltx_video: 'label_guidance_scale',
+  guidance_scale_wan22: 'label_guidance_scale',
+  guidance_scale_wan_move: 'label_guidance_scale',
+  interpolator_model: 'label_interpolator',
+  keep_audio: 'label_keep_audio',
+  keep_audio_on: 'label_keep_audio',
+  keep_original_sound: 'label_keep_original_sound',
+  motions: 'label_motions',
+  multi_shots: 'label_multi_shots',
+  multi_shots_on: 'label_multi_shots',
+  negative_prompt: 'label_negative_prompt',
+  negative_prompt_animatediff: 'label_negative_prompt',
+  negative_prompt_kling: 'label_negative_prompt',
+  negative_prompt_ltx_video: 'label_negative_prompt',
+  num_frames: 'label_frames',
+  num_frames_framepack: 'label_frames',
+  num_frames_hunyuan: 'label_frames',
+  num_inference_steps_animatediff: 'label_inference_steps',
+  num_inference_steps_ltx_video: 'label_inference_steps',
+  num_inference_steps_wan22: 'label_inference_steps',
+  num_inference_steps_wan_move: 'label_inference_steps',
+  num_interpolated_frames: 'label_interpolated_frames',
+  pro_mode: 'label_pro_mode',
+  prompt_optimizer: 'label_optimize_prompt',
+  resample_fps: 'label_resample_fps',
+  return_frames_zip: 'label_return_frames_zip',
+  safety_tolerance_veo31: 'label_safety_tolerance',
+  seed: 'label_seed',
+  shift: 'label_shift',
+  shot_type_customize: 'label_shot_type',
+  shot_type_v3: 'label_shot_type',
+  strength_animatediff: 'label_strength',
+  strength_wan22: 'label_strength',
+  style_pixverse: 'label_style',
+  sync_mode: 'label_sync_mode',
+  thinking_type: 'label_thinking_type',
+  use_turbo: 'label_turbo_mode',
+  video_quality: 'label_video_quality',
+  video_write_mode: 'label_write_mode',
+  voice_ids: 'label_voice_ids_simple',
+};
+
+const VIDEO_OPTION_VALUE_KEYS = {
+  auto: 'opt_auto',
+  true: 'opt_on',
+  false: 'opt_off',
+  image: 'opt_image',
+  video: 'opt_video',
+  customize: 'opt_customize',
+  intelligent: 'opt_intelligent',
+  full: 'opt_full',
+  preview: 'opt_preview',
+  high: 'opt_high',
+  medium: 'opt_medium',
+  low: 'opt_low',
+  realistic: 'opt_realistic',
+  sculpture: 'opt_sculpture',
+  triangle: 'opt_triangle',
+  quadrilateral: 'opt_quad',
+  quad: 'opt_quad',
+  normal: 'opt_normal',
+  lowpoly: 'opt_lowpoly',
+  geometry: 'opt_geometry',
+  random: 'opt_random',
+  yes: 'opt_yes',
+  no: 'opt_no',
+  on: 'opt_on',
+  off: 'opt_off',
+};
+
+function humanizeVideoOptionKey(key) {
+  return String(key || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function getVideoOptionLabelKey(key, def) {
+  if (VIDEO_OPTION_LABEL_KEYS[key]) return VIDEO_OPTION_LABEL_KEYS[key];
+  if (/^aspect_ratio_/.test(key)) return 'label_aspect_ratio';
+  if (/^duration_/.test(key)) return def && /sec/i.test(def.label || '') ? 'label_duration_seconds' : 'label_duration';
+  if (/^resolution_/.test(key)) return 'label_resolution';
+  return null;
+}
+
+function getVideoOptionLabelText(key, def) {
+  const labelKey = getVideoOptionLabelKey(key, def);
+  if (labelKey) return getI18nText(labelKey, def && def.label ? def.label : humanizeVideoOptionKey(key));
+  return def && def.label ? def.label : humanizeVideoOptionKey(key);
+}
+
+function getVideoOptionValueText(key, value) {
+  const raw = String(value);
+  const valueKey = VIDEO_OPTION_VALUE_KEYS[raw.toLowerCase()];
+  if (valueKey) return getI18nText(valueKey, raw);
+  return raw;
+}
+
+function getVideoOptionPlaceholderText(key, def) {
+  if (def && Object.prototype.hasOwnProperty.call(def, 'default') && def.default !== null && def.default !== '') {
+    return String(def.default);
+  }
+  return getVideoOptionLabelText(key, def);
+}
+
+function localizeVideoOptionFields(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-video-opt-key]').forEach((field) => {
+    const key = field.dataset.videoOptKey;
+    const def = VIDEO_OPTION_DEFS[key] || null;
+    const label = field.querySelector(':scope > label');
+    if (label) label.textContent = getVideoOptionLabelText(key, def);
+    const control = field.querySelector('[data-opt-key]');
+    if (!control) return;
+    if (control.tagName === 'SELECT') {
+      Array.from(control.options).forEach((option) => {
+        if (option.dataset.empty === 'true') option.textContent = getI18nText('opt_default', 'Default');
+        else option.textContent = getVideoOptionValueText(key, option.value);
+      });
+      return;
+    }
+    control.placeholder = getVideoOptionPlaceholderText(key, def);
+  });
+}
+
 function buildVideoOptionInput(key, modelMeta) {
   const def = VIDEO_OPTION_DEFS[key] || null;
-  
+
   const wrap = document.createElement('div');
   wrap.className = 'field';
+  wrap.dataset.videoOptKey = key;
 
   const label = document.createElement('label');
-  label.textContent = def && def.label ? def.label : key.replace(/_/g, ' ');
+  label.textContent = getVideoOptionLabelText(key, def);
   wrap.appendChild(label);
 
-  // Use optionDefs type if available
   const optType = def ? def.type : null;
+  const hasDefault = !!(def && Object.prototype.hasOwnProperty.call(def, 'default'));
 
   if (optType === 'select' && Array.isArray(def.values)) {
     const sel = document.createElement('select');
     sel.dataset.optKey = key;
+
+    if (def.allowEmpty) {
+      const empty = document.createElement('option');
+      empty.value = '';
+      empty.dataset.empty = 'true';
+      empty.textContent = getI18nText('opt_default', def.emptyLabel || 'Default');
+      if (!hasDefault || def.default === null || def.default === '') {
+        empty.selected = true;
+      }
+      sel.appendChild(empty);
+    }
+
     for (const v of def.values) {
       const o = document.createElement('option');
       o.value = v;
-      o.textContent = v;
-      if (def.default !== undefined && String(def.default) === String(v)) {
+      o.textContent = getVideoOptionValueText(key, v);
+      if (hasDefault && String(def.default) === String(v)) {
         o.selected = true;
       }
       sel.appendChild(o);
@@ -831,10 +3272,10 @@ function buildVideoOptionInput(key, modelMeta) {
     const sel = document.createElement('select');
     sel.dataset.optKey = key;
     const defVal = def.default === true ? 'true' : 'false';
-    [{ v: 'false', l: 'Off' }, { v: 'true', l: 'On' }].forEach(({ v, l }) => {
+    ['false', 'true'].forEach((v) => {
       const o = document.createElement('option');
       o.value = v;
-      o.textContent = l;
+      o.textContent = getVideoOptionValueText(key, v);
       if (v === defVal) o.selected = true;
       sel.appendChild(o);
     });
@@ -849,16 +3290,15 @@ function buildVideoOptionInput(key, modelMeta) {
     if (def.min !== undefined) input.min = def.min;
     if (def.max !== undefined) input.max = def.max;
     if (def.step !== undefined) input.step = def.step;
-    if (def.default !== undefined) input.placeholder = String(def.default);
+    input.placeholder = getVideoOptionPlaceholderText(key, def);
     wrap.appendChild(input);
     return wrap;
   }
 
-  // Text input fallback
   const input = document.createElement('input');
   input.dataset.optKey = key;
   input.type = 'text';
-  input.placeholder = def && def.label ? def.label : key;
+  input.placeholder = getVideoOptionPlaceholderText(key, def);
   wrap.appendChild(input);
   return wrap;
 }
@@ -871,6 +3311,7 @@ function renderVideoOptionsUI() {
 
   const modelMeta = getSelectedVideoModel();
   if (!modelMeta) return;
+  if (isKling3VideoKind(modelMeta.kind)) return;
 
   const allowed = Array.isArray(modelMeta.allowedOptions) ? modelMeta.allowedOptions : [];
   if (allowed.length === 0) return;
@@ -884,6 +3325,7 @@ function renderVideoOptionsUI() {
   }
 
   host.appendChild(grid);
+  localizeVideoOptionFields(host);
 }
 
 function collectVideoOptionsFromUI() {
@@ -891,6 +3333,7 @@ function collectVideoOptionsFromUI() {
   if (!modelMeta) return { options: {}, top: {} };
 
   const allowed = new Set(Array.isArray(modelMeta.allowedOptions) ? modelMeta.allowedOptions : []);
+  const optionTypes = (modelMeta.optionTypes && typeof modelMeta.optionTypes === 'object') ? modelMeta.optionTypes : {};
   const els = Array.from(document.querySelectorAll('[data-opt-key]'));
 
   const options = {};
@@ -899,6 +3342,7 @@ function collectVideoOptionsFromUI() {
   for (const el of els) {
     const key = el.dataset.optKey;
     if (!key || !allowed.has(key)) continue;
+    const def = VIDEO_OPTION_DEFS[key] || null;
     let v = (el && 'value' in el) ? el.value : null;
     if (v === null || typeof v === 'undefined') continue;
     if (String(v).trim() === '') continue;
@@ -909,44 +3353,23 @@ function collectVideoOptionsFromUI() {
       continue;
     }
 
-    const b = coerceBoolFromUi(v);
-    if (b !== null && (
-      key === 'enable_safety_checker' ||
-      key === 'enable_output_safety_checker' ||
-      key === 'enable_prompt_expansion' ||
-      key === 'pro_mode' ||
-      key === 'generate_audio' ||
-      key === 'generate_audio_switch' ||
-      key === 'generate_multi_clip_switch' ||
-      key === 'camera_fixed' ||
-      key === 'keep_audio' ||
-      key === 'keep_original_sound' ||
-      key === 'auto_fix' ||
-      key === 'use_turbo' ||
-      key === 'return_frames_zip' ||
-      key === 'delete_video' ||
-      key === 'prompt_optimizer'
-    )) {
-      v = b;
+    if (key === 'motions') {
+      const arr = String(v).split(/[\\n,]/).map((s) => s.trim()).filter(Boolean);
+      if (arr.length > 0) options[key] = arr;
+      continue;
     }
 
-    if (
-      key === 'duration' ||
-      key === 'seed' ||
-      key === 'num_frames' ||
-      key === 'num_inference_steps' ||
-      key === 'cfg_scale' ||
-      key === 'guidance_scale' ||
-      key === 'shift'
-    ) {
+    if (def && def.type === 'bool') {
+      const b = coerceBoolFromUi(v);
+      if (b !== null) v = b;
+    }
+
+    if ((def && def.type === 'number') || optionTypes[key] === 'number') {
       const n = typeof v === 'number' ? v : Number(v);
       if (Number.isFinite(n)) v = n;
     }
 
-    // Map duration variants to top-level duration
-    if (key === 'duration' || key === 'duration_sora' || key === 'duration_hailuo') {
-      top[key] = v;
-    } else if (key === 'aspect_ratio' || key === 'keep_audio' || key === 'video_id') {
+    if (key === 'duration' || key === 'aspect_ratio' || key === 'keep_audio' || key === 'video_id') {
       top[key] = v;
     } else {
       options[key] = v;
@@ -959,7 +3382,11 @@ function collectVideoOptionsFromUI() {
 function ensureVideoControls() {
   const host = qs('videoUploadGroup');
   if (!host) return;
-  if (qs('videoModel')) return;
+  if (qs('videoModel')) {
+    ensureLtx23EmbeddedSection();
+    ensureKling3EmbeddedSection();
+    return;
+  }
 
   const wrap = document.createElement('div');
   wrap.id = 'videoControls';
@@ -967,52 +3394,52 @@ function ensureVideoControls() {
   wrap.innerHTML = `
     <div class="settings-row" style="margin-top:0.75rem;">
       <div class="field" style="flex:2;">
-        <label>Model</label>
+        <label data-i18n="label_model">${getI18nText('label_model', 'Model')}</label>
         <select id="videoModel"></select>
       </div>
     </div>
 
     <div class="settings-row" style="margin-top:0.5rem;" id="videoUrlGroup">
       <div class="field">
-        <label>Video URL</label>
-        <input id="videoUrlInput" type="text" placeholder="https://...mp4" />
+        <label data-i18n="label_video_url">${getI18nText('label_video_url', 'Video URL')}</label>
+        <input id="videoUrlInput" type="text" data-i18n-placeholder="placeholder_video_url" placeholder="${getI18nText('placeholder_video_url', 'https://...mp4')}" />
       </div>
     </div>
 
     <div class="settings-row" style="margin-top:0.5rem;">
       <div class="field" id="videoFileGroup">
-        <label>Upload Video</label>
+        <label data-i18n="label_upload_video">${getI18nText('label_upload_video', 'Upload Video')}</label>
         <div class="upload-zone small" onclick="document.getElementById('videoInput').click()">
           <i data-lucide="film"></i>
-          <span id="videoFileLabel">Select video</span>
+          <span id="videoFileLabel">${getI18nText('upload_video', 'Upload video')}</span>
           <input id="videoInput" type="file" accept="video/*" hidden />
         </div>
       </div>
       <div class="field" id="videoImageFileGroup">
-        <label>Upload Image</label>
+        <label data-i18n="label_upload_image">${getI18nText('label_upload_image', 'Upload Image')}</label>
         <div class="upload-zone small" onclick="document.getElementById('videoImageInput').click()">
           <i data-lucide="image"></i>
-          <span id="videoImageLabel">Select image</span>
+          <span id="videoImageLabel">${getI18nText('select_image', 'Select image')}</span>
           <input id="videoImageInput" type="file" accept="image/*" hidden />
         </div>
       </div>
     </div>
 
     <div class="field" id="referenceImagesGroup" style="margin-top:0.5rem;">
-      <label>Reference Images (1-7)</label>
+      <label data-i18n="label_reference_images_video">${getI18nText('label_reference_images_video', 'Reference Images (1-7)')}</label>
       <div class="upload-zone small" onclick="document.getElementById('referenceImagesInput').click()">
         <i data-lucide="images"></i>
-        <span id="refImagesLabel">Select images</span>
+        <span id="refImagesLabel">${getI18nText('select_images', 'Select images')}</span>
         <input id="referenceImagesInput" type="file" accept="image/*" multiple hidden />
       </div>
     </div>
 
     <div class="settings-row" style="margin-top:0.5rem;" id="videoEndImageGroup">
       <div class="field">
-        <label>End Frame (optional)</label>
+        <label data-i18n="label_end_frame_optional">${getI18nText('label_end_frame_optional', 'End Frame (optional)')}</label>
         <div class="upload-zone small" onclick="document.getElementById('videoEndImageInput').click()">
           <i data-lucide="image"></i>
-          <span id="endImageLabel">Select image</span>
+          <span id="endImageLabel">${getI18nText('select_image', 'Select image')}</span>
           <input id="videoEndImageInput" type="file" accept="image/*" hidden />
         </div>
       </div>
@@ -1020,17 +3447,17 @@ function ensureVideoControls() {
 
     <div class="settings-row" style="margin-top:0.5rem;" id="videoIdGroup">
       <div class="field">
-        <label>Video ID</label>
-        <input id="videoIdInput" type="text" placeholder="Enter video ID" />
+        <label data-i18n="label_video_id">${getI18nText('label_video_id', 'Video ID')}</label>
+        <input id="videoIdInput" type="text" data-i18n-placeholder="placeholder_video_id" placeholder="${getI18nText('placeholder_video_id', 'Enter video ID')}" />
       </div>
     </div>
 
     <div class="settings-row" style="margin-top:0.5rem;" id="audioFileGroup">
       <div class="field">
-        <label>Audio File</label>
+        <label data-i18n="label_audio_file">${getI18nText('label_audio_file', 'Audio File')}</label>
         <div class="upload-zone small" onclick="document.getElementById('audioInput').click()">
           <i data-lucide="music"></i>
-          <span id="audioFileLabel">Select audio</span>
+          <span id="audioFileLabel">${getI18nText('select_audio', 'Select audio')}</span>
           <input id="audioInput" type="file" accept="audio/*" hidden />
         </div>
       </div>
@@ -1040,20 +3467,31 @@ function ensureVideoControls() {
   `;
 
   host.appendChild(wrap);
+  ensureLtx23EmbeddedSection();
+  ensureKling3EmbeddedSection();
+  if (window.I18N && typeof window.I18N.applyLocale === 'function') {
+    window.I18N.applyLocale();
+  }
 
   const modelSel = qs('videoModel');
 
   loadVideoModels()
     .then(() => {
       refreshVideoModelDropdown();
-      // Restore saved video model from localStorage
+      const items = getVideoModelsForTab(currentVideoTab);
       try {
-        const saved = JSON.parse(localStorage.getItem('nano_app_state') || '{}');
-        if (saved.selects && saved.selects.videoModel && modelSel) {
-          modelSel.value = saved.selects.videoModel;
+        const saved = JSON.parse(localStorage.getItem(APP_STATE_KEY) || '{}');
+        const savedVideoModelId = saved && saved.selects ? String(saved.selects.videoModel || '') : '';
+        const savedKlingModelId = saved && saved.selects ? String(saved.selects.kling3Model || '') : '';
+        if (savedVideoModelId && modelSel && items.some((m) => m.id === savedVideoModelId)) {
+          modelSel.value = savedVideoModelId;
+        } else if (savedKlingModelId && modelSel && items.some((m) => m.id === savedKlingModelId)) {
+          modelSel.value = savedKlingModelId;
         }
       } catch (_) {}
-      if (modelSel && !modelSel.value && VIDEO_MODELS[0]) modelSel.value = VIDEO_MODELS[0].id;
+      if (modelSel && (!modelSel.value || !items.some((m) => m.id === modelSel.value)) && items[0]) {
+        modelSel.value = items[0].id;
+      }
       updateVideoUiVisibility();
       renderVideoOptionsUI();
     })
@@ -1068,87 +3506,67 @@ function ensureVideoControls() {
     });
   }
 
-  qs('videoInput').addEventListener('change', (e) => {
-    uploadedVideoFile = (e.target.files || [])[0] || null;
-    const label = qs('videoFileLabel');
-    if (label) label.textContent = uploadedVideoFile ? uploadedVideoFile.name : 'Select video';
-    e.target.value = '';
-  });
-  qs('videoImageInput').addEventListener('change', (e) => {
-    uploadedVideoImageFile = (e.target.files || [])[0] || null;
-    const label = qs('videoImageLabel');
-    if (label) label.textContent = uploadedVideoImageFile ? uploadedVideoImageFile.name : 'Select image';
-    e.target.value = '';
-  });
-  qs('referenceImagesInput').addEventListener('change', (e) => {
-    uploadedReferenceImages = Array.from(e.target.files || []);
-    const label = qs('refImagesLabel');
-    if (label) label.textContent = uploadedReferenceImages.length > 0 ? `${uploadedReferenceImages.length} images` : 'Select images';
-    e.target.value = '';
+  ['videoInput', 'videoImageInput', 'referenceImagesInput', 'videoEndImageInput', 'audioInput'].forEach((inputId) => {
+    bindManagedUploadById(inputId);
+    const inputEl = qs(inputId);
+    if (inputEl) setupDropZone(inputEl.closest('.upload-zone'), inputEl);
   });
 
-  const endImg = qs('videoEndImageInput');
-  if (endImg) {
-    endImg.addEventListener('change', (e) => {
-      uploadedEndImageFile = (e.target.files || [])[0] || null;
-      const label = qs('endImageLabel');
-      if (label) label.textContent = uploadedEndImageFile ? uploadedEndImageFile.name : 'Select image';
-      e.target.value = '';
-    });
-  }
-
-  const audioInput = qs('audioInput');
-  if (audioInput) {
-    audioInput.addEventListener('change', (e) => {
-      uploadedAudioFile = (e.target.files || [])[0] || null;
-      const label = qs('audioFileLabel');
-      if (label) label.textContent = uploadedAudioFile ? uploadedAudioFile.name : 'Select audio';
-      e.target.value = '';
-    });
-  }
-
-  // --- Drag & Drop for video upload zones ---
-  const vInput = qs('videoInput');
-  if (vInput) setupDropZone(vInput.closest('.upload-zone'), vInput);
-  const viInput = qs('videoImageInput');
-  if (viInput) setupDropZone(viInput.closest('.upload-zone'), viInput);
-  const riInput = qs('referenceImagesInput');
-  if (riInput) setupDropZone(riInput.closest('.upload-zone'), riInput);
-  const veiInput = qs('videoEndImageInput');
-  if (veiInput) setupDropZone(veiInput.closest('.upload-zone'), veiInput);
-  const aiInput = qs('audioInput');
-  if (aiInput) setupDropZone(aiInput.closest('.upload-zone'), aiInput);
-
-  // Reinitialize Lucide icons for dynamically added elements
   if (window.lucide && typeof window.lucide.createIcons === 'function') {
     window.lucide.createIcons();
   }
 }
-
 function updateVideoUiVisibility() {
   ensureVideoControls();
+  ensureLtx23EmbeddedSection();
+  ensureKling3EmbeddedSection();
   const modelMeta = getSelectedVideoModel();
   const kind = (modelMeta && modelMeta.kind) ? modelMeta.kind : currentVideoTab;
+  const isKlingModel = !!(modelMeta && isKling3VideoKind(modelMeta.kind));
+  const isLtx23Model = !!(modelMeta && isLtx23VideoModelId(modelMeta.id));
+  const supportsReferenceImages = !modelMeta || modelMeta.usesImageUrls !== false;
 
-  const showVideo = kind === 'video-to-video' || kind === 'motion-control';
-  const showImage = kind === 'image-to-video' || kind === 'motion-control' || kind === 'reference-to-video';
-  const showRefs = kind === 'reference-to-video' || kind === 'video-to-video';
+  const showVideo = !isKlingModel && (kind === 'video-to-video' || kind === 'motion-control' || kind === 'video-id-to-video');
+  const showImage = !isKlingModel && (kind === 'image-to-video' || kind === 'audio-to-video' || kind === 'motion-control' || kind === 'reference-to-video');
+  const showRefs = !isKlingModel && supportsReferenceImages && (kind === 'reference-to-video' || kind === 'video-to-video');
+  const showAudioModelRow = true;
 
   if (qs('videoUrlGroup')) qs('videoUrlGroup').style.display = showVideo ? 'block' : 'none';
   if (qs('videoFileGroup')) qs('videoFileGroup').style.display = showVideo ? 'block' : 'none';
   if (qs('videoImageFileGroup')) qs('videoImageFileGroup').style.display = showImage ? 'block' : 'none';
   if (qs('referenceImagesGroup')) qs('referenceImagesGroup').style.display = showRefs ? 'block' : 'none';
 
-  const showEndImage = !!(modelMeta && modelMeta.supportsEndImage && kind === 'image-to-video');
+  const videoModelRow = qs('videoModel') ? qs('videoModel').closest('.settings-row') : null;
+  if (videoModelRow) videoModelRow.style.display = showAudioModelRow ? '' : 'none';
+
+  const showEndImage = !!(!isKlingModel && modelMeta && modelMeta.supportsEndImage && kind === 'image-to-video');
   if (qs('videoEndImageGroup')) qs('videoEndImageGroup').style.display = showEndImage ? 'block' : 'none';
 
-  const showVideoId = kind === 'video-id-to-video';
+  const showVideoId = !isKlingModel && kind === 'video-id-to-video';
   if (qs('videoIdGroup')) qs('videoIdGroup').style.display = showVideoId ? 'block' : 'none';
 
   // Show audio file upload for models that support audio_url
   const allowedOpts = (modelMeta && Array.isArray(modelMeta.allowedOptions)) ? modelMeta.allowedOptions : [];
-  const showAudio = allowedOpts.includes('audio_url');
+  const showAudio = !isKlingModel && allowedOpts.includes('audio_url');
   if (qs('audioFileGroup')) qs('audioFileGroup').style.display = showAudio ? 'block' : 'none';
+
+  const videoOptionsHost = qs('videoOptionsDynamic');
+  if (videoOptionsHost) videoOptionsHost.style.display = isKlingModel ? 'none' : '';
+
+  const ltxSection = qs('ltx23UploadGroup');
+  if (ltxSection) ltxSection.style.display = isLtx23Model ? 'block' : 'none';
+
+  const klingSection = qs('kling3UploadGroup');
+  if (klingSection) klingSection.style.display = isKlingModel ? 'block' : 'none';
+
+  if (isLtx23Model) {
+    syncLtx23StateFromVideoModelId(modelMeta.id, { skipSave: true });
+  }
+
+  if (isKlingModel) {
+    syncKling3StateFromVideoModelId(modelMeta.id, { skipSave: true });
+    updateKling3UiVisibility();
+  }
 }
 
 function update3dUiVisibility() {
@@ -1262,9 +3680,8 @@ function update3dUiVisibility() {
   }
 }
 
-function switchVideoTab(tab) {
-  currentVideoTab = tab;
-  const ids = ['vtab-text', 'vtab-image', 'vtab-video', 'vtab-reference'];
+function setActiveVideoTabButtonState(tab) {
+  const ids = ['vtab-text', 'vtab-image', 'vtab-video', 'vtab-reference', 'vtab-audio'];
   for (const id of ids) {
     const el = qs(id);
     if (el) el.classList.remove('active');
@@ -1274,8 +3691,14 @@ function switchVideoTab(tab) {
     'image-to-video': 'vtab-image',
     'video-to-video': 'vtab-video',
     'reference-to-video': 'vtab-reference',
+    'audio-to-video': 'vtab-audio',
   };
   if (map[tab] && qs(map[tab])) qs(map[tab]).classList.add('active');
+}
+
+function switchVideoTab(tab) {
+  currentVideoTab = tab;
+  setActiveVideoTabButtonState(tab);
 
   ensureVideoControls();
   if (videoModelsLoaded) {
@@ -1312,14 +3735,16 @@ function getKling3ModelsForTab(tab) {
   return KLING3_MODELS[tab] || [];
 }
 
-function refreshKling3ModelDropdown() {
+function refreshKling3ModelDropdown(preferredId = '') {
   const sel = qs('kling3Model');
   if (!sel) return;
   const prev = sel.value;
   const items = getKling3ModelsForTab(currentKling3Tab);
   setSelectOptions(sel, items);
   const remembered = kling3SelectedModelByTab[currentKling3Tab];
-  if (remembered && Array.isArray(items) && items.some((m) => m.id === remembered)) {
+  if (preferredId && Array.isArray(items) && items.some((m) => m.id === preferredId)) {
+    sel.value = preferredId;
+  } else if (remembered && Array.isArray(items) && items.some((m) => m.id === remembered)) {
     sel.value = remembered;
   } else if (prev && Array.isArray(items) && items.some((m) => m.id === prev)) {
     sel.value = prev;
@@ -1328,7 +3753,24 @@ function refreshKling3ModelDropdown() {
   }
 }
 
-function switchKling3Tab(tab) {
+function syncKling3StateFromVideoModelId(modelId, options = {}) {
+  const klingTab = getKling3TabForModelId(modelId);
+  if (!klingTab) return false;
+  const klingSelect = qs('kling3Model');
+  const currentKlingModelId = klingSelect ? String(klingSelect.value || '').trim() : '';
+  if (currentKling3Tab === klingTab && currentKlingModelId === modelId) {
+    kling3SelectedModelByTab[klingTab] = modelId;
+    return true;
+  }
+  switchKling3Tab(klingTab, {
+    skipVideoSelectionSync: true,
+    skipSave: options.skipSave === true,
+    preferredModelId: modelId,
+  });
+  return true;
+}
+
+function switchKling3Tab(tab, options = {}) {
   const prevTab = currentKling3Tab;
   const modelSel = qs('kling3Model');
   if (modelSel && prevTab) {
@@ -1342,7 +3784,7 @@ function switchKling3Tab(tab) {
     currentKling3Family = 'o3';
     kling3LastTabByFamily.o3 = tab;
   }
-  const tabIds = ['k3tab-v3-text', 'k3tab-v3-image', 'k3tab-o3-text', 'k3tab-o3-image', 'k3tab-o3-ref', 'k3tab-o3-v2v'];
+  const tabIds = ['k3tab-v3-text', 'k3tab-v3-image', 'k3tab-v3-motion', 'k3tab-o3-text', 'k3tab-o3-image', 'k3tab-o3-ref', 'k3tab-o3-v2v'];
   for (const id of tabIds) {
     const el = qs(id);
     if (el) el.classList.remove('active');
@@ -1350,6 +3792,7 @@ function switchKling3Tab(tab) {
   const map = {
     'v3-text-to-video': 'k3tab-v3-text',
     'v3-image-to-video': 'k3tab-v3-image',
+    'v3-motion-control': 'k3tab-v3-motion',
     'o3-text-to-video': 'k3tab-o3-text',
     'o3-image-to-video': 'k3tab-o3-image',
     'o3-reference-to-video': 'k3tab-o3-ref',
@@ -1367,17 +3810,37 @@ function switchKling3Tab(tab) {
   if (v3Family) v3Family.classList.toggle('active', currentKling3Family === 'v3');
   if (o3Family) o3Family.classList.toggle('active', currentKling3Family === 'o3');
 
-  refreshKling3ModelDropdown();
+  refreshKling3ModelDropdown(options.preferredModelId || '');
+  if (modelSel && modelSel.value) {
+    kling3SelectedModelByTab[currentKling3Tab] = modelSel.value;
+  }
+
+  if (!options.skipVideoSelectionSync) {
+    const preferredVideoModelId = (modelSel && modelSel.value) ? modelSel.value : (options.preferredModelId || '');
+    const nextVideoTab = getVideoTabForKling3Tab(tab);
+    if (nextVideoTab) {
+      currentVideoTab = nextVideoTab;
+      setActiveVideoTabButtonState(nextVideoTab);
+      if (qs('videoModel')) {
+        refreshVideoModelDropdown(preferredVideoModelId);
+      }
+    }
+  }
+
   updateKling3UiVisibility();
-  if (typeof saveAppState === 'function') saveAppState();
+  if (!options.skipVideoSelectionSync) {
+    updateVideoUiVisibility();
+    renderVideoOptionsUI();
+  }
+  if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
 }
 window.switchKling3Tab = switchKling3Tab;
 
-function switchKling3Family(family) {
+function switchKling3Family(family, options = {}) {
   if (family !== 'v3' && family !== 'o3') return;
   currentKling3Family = family;
   const nextTab = kling3LastTabByFamily[family] || (family === 'v3' ? 'v3-text-to-video' : 'o3-text-to-video');
-  switchKling3Tab(nextTab);
+  switchKling3Tab(nextTab, options);
 }
 window.switchKling3Family = switchKling3Family;
 
@@ -1387,29 +3850,40 @@ function updateKling3UiVisibility() {
   const isI2V = tab === 'v3-image-to-video' || tab === 'o3-image-to-video';
   const isRef = tab === 'o3-reference-to-video';
   const isV2V = tab === 'o3-video-to-video';
+  const isMotionTab = tab === 'v3-motion-control';
   const isV3 = tab.startsWith('v3-');
-  const isO3 = tab.startsWith('o3-');
-  const selectedModelId = qs('kling3Model') ? qs('kling3Model').value : '';
+  const selectedModelId = getSelectedKling3ModelId();
   const isV2VEdit = selectedModelId === 'kling-o3-pro-v2v-edit';
   const isV2VRef = selectedModelId === 'kling-o3-pro-v2v-ref';
+  const isMotionModel = isKling3MotionModelId(selectedModelId);
+  const showMotionControls = isMotionTab || isMotionModel;
+  const showMotionElements = showMotionControls && isKling3MotionOrientationVideo();
+  const isV3Classic = isV3 && !showMotionControls;
 
-  // Start image (for I2V and Ref modes)
-  if (qs('kling3StartImageGroup')) qs('kling3StartImageGroup').style.display = (isI2V || isRef) ? 'block' : 'none';
+  // Start image (for I2V, Ref and Motion modes)
+  if (qs('kling3StartImageGroup')) qs('kling3StartImageGroup').style.display = (isI2V || isRef || showMotionControls) ? 'block' : 'none';
   // End image (for I2V and O3 Ref modes)
   if (qs('kling3EndImageGroup')) qs('kling3EndImageGroup').style.display = (isI2V || isRef) ? 'block' : 'none';
-  // Video upload (for V2V modes)
-  if (qs('kling3VideoGroup')) qs('kling3VideoGroup').style.display = isV2V ? 'block' : 'none';
+  // Video upload (for V2V and Motion modes)
+  if (qs('kling3VideoGroup')) qs('kling3VideoGroup').style.display = (isV2V || showMotionControls) ? 'block' : 'none';
   // Reference images (for Ref and V2V modes)
   if (qs('kling3RefImagesGroup')) qs('kling3RefImagesGroup').style.display = (isRef || isV2V) ? 'block' : 'none';
-  // Elements (for V3 I2V and O3 Ref/V2V)
-  if (qs('kling3ElementsGroup')) qs('kling3ElementsGroup').style.display = ((isV3 && isI2V) || isRef || isV2V) ? 'block' : 'none';
+  // Elements (for V3 I2V, O3 Ref/V2V, and V3 motion with video orientation)
+  if (qs('kling3ElementsGroup')) qs('kling3ElementsGroup').style.display = ((isV3 && isI2V) || isRef || isV2V || showMotionElements) ? 'block' : 'none';
+
+  if (showMotionControls && kling3Elements.length > 1) {
+    kling3Elements = kling3Elements.slice(0, 1);
+    renderKling3Elements();
+  }
+
+  // Motion-specific settings
+  if (qs('kling3MotionSettings')) qs('kling3MotionSettings').style.display = showMotionControls ? 'grid' : 'none';
 
   // Shot type - V3 T2V has intelligent option, others only customize
   const shotTypeGroup = qs('kling3ShotTypeGroup');
   const shotTypeSel = qs('kling3ShotType');
   if (shotTypeGroup && shotTypeSel) {
     shotTypeGroup.style.display = (isT2V || isI2V || isRef || isV2V) ? 'block' : 'none';
-    // Update options based on mode
     if (tab === 'v3-text-to-video') {
       shotTypeSel.innerHTML = '<option value="customize" selected>Customize</option><option value="intelligent">Intelligent</option>';
     } else {
@@ -1417,26 +3891,25 @@ function updateKling3UiVisibility() {
     }
   }
 
-  // CFG Scale (V3 only)
-  if (qs('kling3CfgScaleGroup')) qs('kling3CfgScaleGroup').style.display = isV3 ? 'block' : 'none';
-  // Negative prompt (V3 only)
-  if (qs('kling3NegativePromptGroup')) qs('kling3NegativePromptGroup').style.display = isV3 ? 'block' : 'none';
+  // CFG Scale / Negative prompt (classic V3 only)
+  if (qs('kling3CfgScaleGroup')) qs('kling3CfgScaleGroup').style.display = isV3Classic ? 'block' : 'none';
+  if (qs('kling3NegativePromptGroup')) qs('kling3NegativePromptGroup').style.display = isV3Classic ? 'block' : 'none';
 
-  // Duration/Aspect for V2V: only V2V Reference supports these
+  // Duration/Aspect for V2V: only V2V Reference supports these; hidden for motion-control
   if (qs('kling3DurationGroup')) {
-    qs('kling3DurationGroup').style.display = isV2V && isV2VEdit ? 'none' : 'block';
+    qs('kling3DurationGroup').style.display = (showMotionControls || (isV2V && isV2VEdit)) ? 'none' : 'block';
   }
   if (qs('kling3AspectRatioGroup')) {
-    qs('kling3AspectRatioGroup').style.display = isV2V && isV2VEdit ? 'none' : 'block';
+    qs('kling3AspectRatioGroup').style.display = (showMotionControls || (isV2V && isV2VEdit)) ? 'none' : 'block';
   }
 
-  // Audio settings (V3, O3 T2V, O3 I2V, O3 Ref, and V2V have generate_audio)
-  if (qs('kling3AudioSettings')) qs('kling3AudioSettings').style.display = (isV3 || isT2V || isRef || tab === 'o3-image-to-video' || isV2V) ? 'grid' : 'none';
-  // Keep audio only for V2V
+  // Audio settings (not for motion-control)
+  const showAudioSettings = !showMotionControls && (isV3Classic || isT2V || isRef || tab === 'o3-image-to-video' || isV2V);
+  if (qs('kling3AudioSettings')) qs('kling3AudioSettings').style.display = showAudioSettings ? 'grid' : 'none';
   if (qs('kling3KeepAudioGroup')) qs('kling3KeepAudioGroup').style.display = isV2V ? 'block' : 'none';
 
-  // Voice IDs (V3 and O3 T2V)
-  if (qs('kling3VoiceGroup')) qs('kling3VoiceGroup').style.display = (isV3 || tab === 'o3-text-to-video') ? 'block' : 'none';
+  // Voice IDs (V3 classic + O3 T2V)
+  if (qs('kling3VoiceGroup')) qs('kling3VoiceGroup').style.display = (isV3Classic || tab === 'o3-text-to-video') ? 'block' : 'none';
 
   // Aspect ratio with auto option for O3 V2V
   const arSel = qs('kling3AspectRatio');
@@ -1457,7 +3930,7 @@ function updateKling3UiVisibility() {
     }
   }
 
-  // Multi-prompt section
+  // Multi-prompt section (not for motion-control)
   if (qs('kling3MultiPromptSection')) {
     qs('kling3MultiPromptSection').style.display = (isT2V || isI2V) ? 'block' : 'none';
   }
@@ -1468,47 +3941,10 @@ function updateKling3UiVisibility() {
     controls.querySelectorAll('.settings-grid').forEach(grid => animateGrid(grid));
   }
 }
-
 function initKling3Controls() {
-  const startImg = qs('kling3StartImageInput');
-  if (startImg) {
-    startImg.addEventListener('change', (e) => {
-      uploadedKling3StartImage = (e.target.files || [])[0] || null;
-      const label = qs('kling3StartImageLabel');
-      if (label) label.textContent = uploadedKling3StartImage ? uploadedKling3StartImage.name : 'Select image';
-      e.target.value = '';
-    });
-  }
-
-  const endImg = qs('kling3EndImageInput');
-  if (endImg) {
-    endImg.addEventListener('change', (e) => {
-      uploadedKling3EndImage = (e.target.files || [])[0] || null;
-      const label = qs('kling3EndImageLabel');
-      if (label) label.textContent = uploadedKling3EndImage ? uploadedKling3EndImage.name : 'Select image';
-      e.target.value = '';
-    });
-  }
-
-  const videoInput = qs('kling3VideoInput');
-  if (videoInput) {
-    videoInput.addEventListener('change', (e) => {
-      uploadedKling3Video = (e.target.files || [])[0] || null;
-      const label = qs('kling3VideoLabel');
-      if (label) label.textContent = uploadedKling3Video ? uploadedKling3Video.name : 'Upload video';
-      e.target.value = '';
-    });
-  }
-
-  const refImgs = qs('kling3RefImagesInput');
-  if (refImgs) {
-    refImgs.addEventListener('change', (e) => {
-      uploadedKling3RefImages = Array.from(e.target.files || []);
-      const label = qs('kling3RefImagesLabel');
-      if (label) label.textContent = uploadedKling3RefImages.length > 0 ? `${uploadedKling3RefImages.length} images` : 'Select images';
-      e.target.value = '';
-    });
-  }
+  ['kling3StartImageInput', 'kling3EndImageInput', 'kling3VideoInput', 'kling3RefImagesInput'].forEach((inputId) => {
+    bindManagedUploadById(inputId);
+  });
 
   const multiPromptCheck = qs('kling3UseMultiPrompt');
   if (multiPromptCheck) {
@@ -1527,19 +3963,27 @@ function initKling3Controls() {
   if (modelSel) {
     modelSel.addEventListener('change', () => {
       kling3SelectedModelByTab[currentKling3Tab] = modelSel.value;
+      if (qs('videoModel') && isKling3VideoModelId(modelSel.value)) {
+        const nextVideoTab = getVideoTabForKling3Tab(currentKling3Tab);
+        if (nextVideoTab) currentVideoTab = nextVideoTab;
+        refreshVideoModelDropdown(modelSel.value);
+        updateVideoUiVisibility();
+        renderVideoOptionsUI();
+      }
       updateKling3UiVisibility();
     });
   }
 
-  // --- Drag & Drop for Kling3 upload zones ---
-  const k3Start = qs('kling3StartImageInput');
-  if (k3Start) setupDropZone(k3Start.closest('.upload-zone'), k3Start);
-  const k3End = qs('kling3EndImageInput');
-  if (k3End) setupDropZone(k3End.closest('.upload-zone'), k3End);
-  const k3Vid = qs('kling3VideoInput');
-  if (k3Vid) setupDropZone(k3Vid.closest('.upload-zone'), k3Vid);
-  const k3Ref = qs('kling3RefImagesInput');
-  if (k3Ref) setupDropZone(k3Ref.closest('.upload-zone'), k3Ref);
+  const motionOrientationSel = qs('kling3MotionOrientation');
+  if (motionOrientationSel) {
+    motionOrientationSel.addEventListener('change', () => {
+      updateKling3UiVisibility();
+    });
+  }
+  ['kling3StartImageInput', 'kling3EndImageInput', 'kling3VideoInput', 'kling3RefImagesInput'].forEach((inputId) => {
+    const inputEl = qs(inputId);
+    if (inputEl) setupDropZone(inputEl.closest('.upload-zone'), inputEl);
+  });
 }
 
 function addKling3MultiPromptItem() {
@@ -1598,8 +4042,13 @@ function renderKling3MultiPrompts() {
   if (window.lucide) window.lucide.createIcons();
 }
 
-// Elements handling for V3 I2V
+// Elements handling for Kling 3
 function addKling3Element() {
+  const selectedModelId = getSelectedKling3ModelId();
+  if (isKling3MotionModelId(selectedModelId) && kling3Elements.length >= 1) {
+    showToast(window.I18N ? I18N.t('toast_kling3_motion_one_element') : 'Kling 3 motion-control supports only one element.', 'error');
+    return;
+  }
   const id = Date.now();
   kling3Elements.push({ id, frontalImageFile: null, referenceImageFiles: [], videoFile: null });
   renderKling3Elements();
@@ -1640,89 +4089,141 @@ function renderKling3Elements() {
   const list = qs('kling3ElementsList');
   if (!list) return;
 
-  list.innerHTML = kling3Elements.map((item, idx) => {
-    const frontalLabel = item.frontalImageFile ? item.frontalImageFile.name : 'Upload frontal';
-    const refLabel = item.referenceImageFiles && item.referenceImageFiles.length > 0 
-      ? `${item.referenceImageFiles.length} image(s)` 
-      : 'Upload refs';
-    const videoLabel = item.videoFile ? item.videoFile.name : 'Upload video';
-    
+  const selectedModelId = getSelectedKling3ModelId();
+  const isMotionModel = isKling3MotionModelId(selectedModelId);
+  if (isMotionModel && kling3Elements.length > 1) {
+    kling3Elements = kling3Elements.slice(0, 1);
+  }
+  const displayElements = isMotionModel ? kling3Elements.slice(0, 1) : kling3Elements;
+
+  list.innerHTML = displayElements.map((item, idx) => {
+    const gridColumns = isMotionModel ? '1fr 1fr' : '1fr 1fr 1fr';
+    const videoFieldHtml = isMotionModel ? '' : `
+        <div class="field">
+          <label style="font-size:0.65rem;">${getI18nText('label_video_optional', 'Video (opt)')}</label>
+          <div class="upload-zone small" onclick="document.getElementById('k3-el-video-${item.id}').click()" style="padding:0.3rem;font-size:0.65rem;">
+            <i data-lucide="film" style="width:12px;height:12px;"></i>
+            <span id="k3-el-video-label-${item.id}" style="font-size:0.6rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60px;">${escapeHtml(getI18nText('upload_video', 'Upload video'))}</span>
+            <input type="file" id="k3-el-video-${item.id}" data-id="${item.id}" accept="video/*" hidden class="k3-el-video-input" />
+          </div>
+        </div>
+    `;
+
     return `
     <div class="multi-prompt-item" data-id="${item.id}">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
         <strong style="font-size:0.75rem;">@Element${idx + 1}</strong>
-        <button type="button" onclick="removeKling3Element(${item.id})" style="background:var(--error);border:none;color:#fff;padding:0.25rem 0.4rem;border-radius:var(--radius-xs);cursor:pointer;font-size:0.7rem;">
+        <button type="button" onclick="removeKling3Element(${item.id})" title="${escapeHtml(getI18nText('btn_remove', 'Remove'))}" style="background:var(--error);border:none;color:#fff;padding:0.25rem 0.4rem;border-radius:var(--radius-xs);cursor:pointer;font-size:0.7rem;">
           <i data-lucide="trash-2" style="width:12px;height:12px;"></i>
         </button>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.35rem;">
+      <div style="display:grid;grid-template-columns:${gridColumns};gap:0.35rem;">
         <div class="field">
-          <label style="font-size:0.65rem;">Frontal Image</label>
+          <label style="font-size:0.65rem;">${getI18nText('label_frontal_image', 'Frontal Image')}</label>
           <div class="upload-zone small" onclick="document.getElementById('k3-el-frontal-${item.id}').click()" style="padding:0.3rem;font-size:0.65rem;">
             <i data-lucide="image" style="width:12px;height:12px;"></i>
-            <span style="font-size:0.6rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60px;">${escapeHtml(frontalLabel)}</span>
+            <span id="k3-el-frontal-label-${item.id}" style="font-size:0.6rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60px;">${escapeHtml(getI18nText('upload_frontal', 'Upload frontal'))}</span>
             <input type="file" id="k3-el-frontal-${item.id}" data-id="${item.id}" accept="image/*" hidden class="k3-el-frontal-input" />
           </div>
         </div>
         <div class="field">
-          <label style="font-size:0.65rem;">Ref Images</label>
+          <label style="font-size:0.65rem;">${getI18nText('label_ref_images_short', 'Ref Images')}</label>
           <div class="upload-zone small" onclick="document.getElementById('k3-el-refs-${item.id}').click()" style="padding:0.3rem;font-size:0.65rem;">
             <i data-lucide="images" style="width:12px;height:12px;"></i>
-            <span style="font-size:0.6rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60px;">${escapeHtml(refLabel)}</span>
+            <span id="k3-el-refs-label-${item.id}" style="font-size:0.6rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60px;">${escapeHtml(getI18nText('upload_refs', 'Upload refs'))}</span>
             <input type="file" id="k3-el-refs-${item.id}" data-id="${item.id}" accept="image/*" multiple hidden class="k3-el-refs-input" />
           </div>
         </div>
-        <div class="field">
-          <label style="font-size:0.65rem;">Video (opt)</label>
-          <div class="upload-zone small" onclick="document.getElementById('k3-el-video-${item.id}').click()" style="padding:0.3rem;font-size:0.65rem;">
-            <i data-lucide="film" style="width:12px;height:12px;"></i>
-            <span style="font-size:0.6rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60px;">${escapeHtml(videoLabel)}</span>
-            <input type="file" id="k3-el-video-${item.id}" data-id="${item.id}" accept="video/*" hidden class="k3-el-video-input" />
-          </div>
-        </div>
+        ${videoFieldHtml}
       </div>
     </div>
   `;
   }).join('');
 
-  // Attach file input event listeners
-  list.querySelectorAll('.k3-el-frontal-input').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const id = Number(e.target.dataset.id);
-      if (e.target.files && e.target.files[0]) {
-        handleElementFrontalUpload(id, e.target.files[0]);
-      }
-      e.target.value = '';
-    });
-  });
-  list.querySelectorAll('.k3-el-refs-input').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const id = Number(e.target.dataset.id);
-      if (e.target.files && e.target.files.length > 0) {
-        handleElementRefUpload(id, e.target.files);
-      }
-      e.target.value = '';
-    });
-  });
-  list.querySelectorAll('.k3-el-video-input').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const id = Number(e.target.dataset.id);
-      if (e.target.files && e.target.files[0]) {
-        handleElementVideoUpload(id, e.target.files[0]);
-      }
-      e.target.value = '';
-    });
-  });
+  displayElements.forEach((item) => {
+    const frontalInput = qs(`k3-el-frontal-${item.id}`);
+    if (frontalInput) {
+      bindManagedUploadInput(frontalInput, {
+        labelId: `k3-el-frontal-label-${item.id}`,
+        emptyKey: 'upload_frontal',
+        previewKind: 'image',
+        kind: 'image',
+        multiple: false,
+        getFiles: () => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          return current && current.frontalImageFile ? [current.frontalImageFile] : [];
+        },
+        getRemoteItems: () => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          return current && current.frontalImageUrl ? [current.frontalImageUrl] : [];
+        },
+        setFiles: (next) => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          if (current) current.frontalImageFile = next || null;
+        },
+        setRemoteItems: (next) => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          if (current) current.frontalImageUrl = next && next.url ? next.url : '';
+        },
+      });
+      setupDropZone(frontalInput.closest('.upload-zone'), frontalInput);
+    }
 
-  // --- Drag & Drop for Kling3 element upload zones ---
-  list.querySelectorAll('.k3-el-frontal-input').forEach(el => {
-    setupDropZone(el.closest('.upload-zone'), el);
-  });
-  list.querySelectorAll('.k3-el-refs-input').forEach(el => {
-    setupDropZone(el.closest('.upload-zone'), el);
-  });
-  list.querySelectorAll('.k3-el-video-input').forEach(el => {
-    setupDropZone(el.closest('.upload-zone'), el);
+    const refsInput = qs(`k3-el-refs-${item.id}`);
+    if (refsInput) {
+      bindManagedUploadInput(refsInput, {
+        labelId: `k3-el-refs-label-${item.id}`,
+        emptyKey: 'upload_refs',
+        previewKind: 'image',
+        kind: 'image',
+        multiple: true,
+        getFiles: () => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          return current ? current.referenceImageFiles : [];
+        },
+        getRemoteItems: () => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          return current ? current.referenceImageUrls || [] : [];
+        },
+        setFiles: (next) => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          if (current) current.referenceImageFiles = next;
+        },
+        setRemoteItems: (next) => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          if (current) current.referenceImageUrls = Array.isArray(next) ? next.map((entry) => entry.url).filter(Boolean) : [];
+        },
+      });
+      setupDropZone(refsInput.closest('.upload-zone'), refsInput);
+    }
+
+    const videoInput = qs(`k3-el-video-${item.id}`);
+    if (videoInput) {
+      bindManagedUploadInput(videoInput, {
+        labelId: `k3-el-video-label-${item.id}`,
+        emptyKey: 'upload_video',
+        previewKind: 'video',
+        kind: 'video',
+        multiple: false,
+        getFiles: () => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          return current && current.videoFile ? [current.videoFile] : [];
+        },
+        getRemoteItems: () => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          return current && current.videoUrl ? [current.videoUrl] : [];
+        },
+        setFiles: (next) => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          if (current) current.videoFile = next || null;
+        },
+        setRemoteItems: (next) => {
+          const current = kling3Elements.find((entry) => entry.id === item.id);
+          if (current) current.videoUrl = next && next.url ? next.url : '';
+        },
+      });
+      setupDropZone(videoInput.closest('.upload-zone'), videoInput);
+    }
   });
 
   if (window.lucide) window.lucide.createIcons();
@@ -1730,64 +4231,79 @@ function renderKling3Elements() {
 
 function collectKling3Options() {
   const options = {};
-
-  // Use the specific option keys that match allowedOptions in VIDEO_MODELS
-  const duration = qs('kling3Duration') ? qs('kling3Duration').value : '5';
-  options.duration_kling3 = duration;
-
-  const aspectRatio = qs('kling3AspectRatio') ? qs('kling3AspectRatio').value : '16:9';
-  options.aspect_ratio_kling3 = aspectRatio;
-
-  // Shot type - V3 T2V uses shot_type_v3 (customize/intelligent), others use shot_type_customize
-  const shotType = qs('kling3ShotType') ? qs('kling3ShotType').value : 'customize';
   const currentTab = currentKling3Tab || 'v3-text-to-video';
-  if (currentTab === 'v3-text-to-video') {
-    options.shot_type_v3 = shotType;
+  const isMotion = currentTab === 'v3-motion-control';
+
+  if (!isMotion) {
+    // Use the specific option keys that match allowedOptions in VIDEO_MODELS
+    const duration = qs('kling3Duration') ? qs('kling3Duration').value : '5';
+    options.duration_kling3 = duration;
+
+    const aspectRatio = qs('kling3AspectRatio') ? qs('kling3AspectRatio').value : '16:9';
+    options.aspect_ratio_kling3 = aspectRatio;
+
+    // Shot type - V3 T2V uses shot_type_v3 (customize/intelligent), others use shot_type_customize
+    const shotType = qs('kling3ShotType') ? qs('kling3ShotType').value : 'customize';
+    if (currentTab === 'v3-text-to-video') {
+      options.shot_type_v3 = shotType;
+    } else {
+      options.shot_type_customize = shotType;
+    }
+
+    // O3 V2V uses aspect_ratio_o3_v2v with 'auto' option
+    if (currentTab === 'o3-video-to-video') {
+      options.aspect_ratio_o3_v2v = aspectRatio;
+    }
+
+    const cfgScale = qs('kling3CfgScale') ? qs('kling3CfgScale').value : '';
+    if (cfgScale) options.cfg_scale = Number(cfgScale);
+
+    const negPrompt = qs('kling3NegativePrompt') ? qs('kling3NegativePrompt').value.trim() : '';
+    if (negPrompt) options.negative_prompt = negPrompt;
+
+    const genAudio = qs('kling3GenerateAudio') ? qs('kling3GenerateAudio').value : 'true';
+    options.generate_audio = genAudio === 'true';
+
+    const keepAudio = qs('kling3KeepAudio') ? qs('kling3KeepAudio').value : 'true';
+    options.keep_audio = keepAudio === 'true';
+
+    const voiceIds = qs('kling3VoiceIds') ? qs('kling3VoiceIds').value.trim() : '';
+    if (voiceIds) {
+      options.voice_ids = voiceIds.split(',').map(s => s.trim()).filter(Boolean).slice(0, 2);
+    }
   } else {
-    options.shot_type_customize = shotType;
-  }
+    const orientation = qs('kling3MotionOrientation') ? qs('kling3MotionOrientation').value : 'video';
+    options.character_orientation_kling3_motion = orientation || 'video';
 
-  // O3 V2V uses aspect_ratio_o3_v2v with 'auto' option
-  if (currentTab === 'o3-video-to-video') {
-    options.aspect_ratio_o3_v2v = aspectRatio;
-  }
-
-  const cfgScale = qs('kling3CfgScale') ? qs('kling3CfgScale').value : '';
-  if (cfgScale) options.cfg_scale = Number(cfgScale);
-
-  const negPrompt = qs('kling3NegativePrompt') ? qs('kling3NegativePrompt').value.trim() : '';
-  if (negPrompt) options.negative_prompt = negPrompt;
-
-  const genAudio = qs('kling3GenerateAudio') ? qs('kling3GenerateAudio').value : 'true';
-  options.generate_audio = genAudio === 'true';
-
-  const keepAudio = qs('kling3KeepAudio') ? qs('kling3KeepAudio').value : 'true';
-  options.keep_audio = keepAudio === 'true';
-
-  const voiceIds = qs('kling3VoiceIds') ? qs('kling3VoiceIds').value.trim() : '';
-  if (voiceIds) {
-    options.voice_ids = voiceIds.split(',').map(s => s.trim()).filter(Boolean).slice(0, 2);
+    const keepOriginalSound = qs('kling3KeepOriginalSound') ? qs('kling3KeepOriginalSound').value : 'true';
+    options.keep_original_sound = keepOriginalSound === 'true';
   }
 
   // Elements will be handled separately in submitKling3Request (file uploads)
-  // Just mark that we have elements to process
-  const validElements = kling3Elements.filter(e => e.frontalImageFile || e.videoFile);
+  const validElements = kling3Elements.filter((e) => (
+    e.frontalImageFile
+    || e.frontalImageUrl
+    || (Array.isArray(e.referenceImageFiles) && e.referenceImageFiles.length > 0)
+    || (Array.isArray(e.referenceImageUrls) && e.referenceImageUrls.length > 0)
+    || e.videoFile
+    || e.videoUrl
+  ));
   if (validElements.length > 0) {
     options.hasElements = true;
   }
 
   return options;
 }
-
 async function submitKling3Request(task) {
-  const modelId = qs('kling3Model') ? qs('kling3Model').value : '';
+  const modelId = getSelectedKling3ModelId(task && task.model_id ? task.model_id : '');
   const prompt = task.prompt;
   const options = collectKling3Options();
 
   const body = { model_id: modelId };
 
   // Check for multi-prompt mode
-  const useMultiPrompt = qs('kling3UseMultiPrompt') && qs('kling3UseMultiPrompt').checked;
+  const isMotionModel = isKling3MotionModelId(modelId);
+  const useMultiPrompt = !isMotionModel && qs('kling3UseMultiPrompt') && qs('kling3UseMultiPrompt').checked;
   if (useMultiPrompt && kling3MultiPrompts.length > 0) {
     const validPrompts = kling3MultiPrompts.filter(p => p.prompt.trim());
     if (validPrompts.length === 0) throw new Error('At least one multi-prompt shot is required');
@@ -1796,8 +4312,8 @@ async function submitKling3Request(task) {
       duration: p.duration,
     }));
   } else {
-    if (!prompt) throw new Error('Prompt is required');
-    body.prompt = prompt;
+    if (!prompt && !isMotionModel) throw new Error('Prompt is required');
+    if (prompt) body.prompt = prompt;
   }
 
   // Pass all options via body.options - backend will filter based on allowedOptions
@@ -1813,36 +4329,48 @@ async function submitKling3Request(task) {
   delete mergedOptions.hasElements;
 
   if (Object.keys(mergedOptions).length > 0) body.options = mergedOptions;
-
   // Upload element files and build elements array
-  if (options.hasElements && kling3Elements.length > 0) {
+  const motionOrientation = qs('kling3MotionOrientation') ? qs('kling3MotionOrientation').value : 'video';
+  const includeElements = !isMotionModel || motionOrientation === 'video';
+  const sourceElements = isMotionModel ? kling3Elements.slice(0, 1) : kling3Elements;
+
+  if (options.hasElements && sourceElements.length > 0 && includeElements) {
     const elementsArray = [];
-    for (const el of kling3Elements) {
-      if (!el.frontalImageFile && !el.videoFile) continue;
+    for (const el of sourceElements) {
+      const hasRefImages = (Array.isArray(el.referenceImageFiles) && el.referenceImageFiles.length > 0)
+        || (Array.isArray(el.referenceImageUrls) && el.referenceImageUrls.length > 0);
+      if (isMotionModel) {
+        if (!el.frontalImageFile && !el.frontalImageUrl && !hasRefImages) continue;
+      } else if (!el.frontalImageFile && !el.frontalImageUrl && !el.videoFile && !el.videoUrl && !hasRefImages) {
+        continue;
+      }
+
       const elementObj = {};
-      
+
       // Upload frontal image
-      if (el.frontalImageFile) {
-        const u = await uploadFileToBlob(el.frontalImageFile, 'kling3-el-frontal');
+      const frontalSource = (el.frontalImageUrl && createRemoteAssetItem({ url: el.frontalImageUrl, type: 'image' })) || el.frontalImageFile;
+      if (frontalSource) {
+        const u = await resolveUploadItemUrl(frontalSource, 'kling3-el-frontal', task);
         if (u) elementObj.frontal_image_url = u;
       }
-      
+
       // Upload reference images
-      if (el.referenceImageFiles && el.referenceImageFiles.length > 0) {
-        const refUrls = [];
-        for (const rf of el.referenceImageFiles) {
-          const u = await uploadFileToBlob(rf, 'kling3-el-ref');
-          if (u) refUrls.push(u);
-        }
+      const elementRefSources = [
+        ...normalizeRemoteAssetItems(el.referenceImageUrls, 'image'),
+        ...(Array.isArray(el.referenceImageFiles) ? el.referenceImageFiles : []),
+      ];
+      if (elementRefSources.length > 0) {
+        const refUrls = await resolveUploadItemUrls(elementRefSources, 'kling3-el-ref', task, isMotionModel ? 3 : Infinity);
         if (refUrls.length > 0) elementObj.reference_image_urls = refUrls;
       }
-      
-      // Upload video
-      if (el.videoFile) {
-        const u = await uploadFileToBlob(el.videoFile, 'kling3-el-video');
+
+      // Upload video (not supported for Kling 3 motion-control elements)
+      const elementVideoSource = (el.videoUrl && createRemoteAssetItem({ url: el.videoUrl, type: 'video' })) || el.videoFile;
+      if (!isMotionModel && elementVideoSource) {
+        const u = await resolveUploadItemUrl(elementVideoSource, 'kling3-el-video', task);
         if (u) elementObj.video_url = u;
       }
-      
+
       if (Object.keys(elementObj).length > 0) {
         elementsArray.push(elementObj);
       }
@@ -1853,31 +4381,34 @@ async function submitKling3Request(task) {
   }
 
   // Upload images
-  if (uploadedKling3StartImage) {
-    const u = await uploadFileToBlob(uploadedKling3StartImage, 'kling3-start');
+  const kling3StartSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.kling3StartImageInput)[0] || uploadedKling3StartImage;
+  if (kling3StartSource) {
+    const u = await resolveUploadItemUrl(kling3StartSource, 'kling3-start', task);
     if (u) body.image_url = u;
   }
 
-  if (uploadedKling3EndImage) {
-    const u = await uploadFileToBlob(uploadedKling3EndImage, 'kling3-end');
+  const kling3EndSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.kling3EndImageInput)[0] || uploadedKling3EndImage;
+  if (kling3EndSource) {
+    const u = await resolveUploadItemUrl(kling3EndSource, 'kling3-end', task);
     if (u) body.end_image_url = u;
   }
 
   // Video URL or upload
   const videoUrl = qs('kling3VideoUrlInput') ? qs('kling3VideoUrlInput').value.trim() : '';
   if (videoUrl) body.video_url = videoUrl;
-  if (uploadedKling3Video) {
-    const u = await uploadFileToBlob(uploadedKling3Video, 'kling3-video');
+  const kling3VideoSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.kling3VideoInput)[0] || uploadedKling3Video;
+  if (kling3VideoSource) {
+    const u = await resolveUploadItemUrl(kling3VideoSource, 'kling3-video', task);
     if (u) body.video_url = u;
   }
 
   // Reference images
-  if (uploadedKling3RefImages && uploadedKling3RefImages.length > 0) {
-    const imageUrls = [];
-    for (const f of uploadedKling3RefImages.slice(0, 4)) {
-      const u = await uploadFileToBlob(f, 'kling3-ref');
-      if (u) imageUrls.push(u);
-    }
+  const kling3RefSources = [
+    ...getManagedUploadRemoteItems(MANAGED_UPLOADS.kling3RefImagesInput),
+    ...(Array.isArray(uploadedKling3RefImages) ? uploadedKling3RefImages : []),
+  ];
+  if (kling3RefSources.length > 0) {
+    const imageUrls = await resolveUploadItemUrls(kling3RefSources, 'kling3-ref', task, 4);
     if (imageUrls.length > 0) body.image_urls = imageUrls;
   }
 
@@ -1886,7 +4417,7 @@ async function submitKling3Request(task) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await createResponseError(res, 'Video generation failed');
   return await res.json();
 }
 
@@ -1977,6 +4508,7 @@ function animateSection(el) {
 }
 
 function switchMode(mode) {
+  if (mode === 'kling3') mode = 'video';
   currentMode = mode;
 
   const modeIds = ['mode-text', 'mode-image', 'mode-video', 'mode-kling3', 'mode-3d', 'mode-tools'];
@@ -2031,15 +4563,6 @@ function switchMode(mode) {
     }
     update3dUiVisibility();
   }
-  if (mode === 'kling3') {
-    const el = qs('kling3UploadGroup');
-    if (el) {
-      el.style.display = 'block';
-      animateSection(el);
-    }
-    initKling3Controls();
-    switchKling3Family(currentKling3Family);
-  }
   if (mode === 'tools') {
     const el = qs('toolsSection');
     if (el) {
@@ -2081,16 +4604,11 @@ let _wizAnimating = false;
 let _toolsInitialized = false;
 
 // Max images per model
-const WIZ_MAX_IMAGES = {
-  'nano-banana-2/edit': 14,
-  'nano-banana-pro/edit': 14,
-  'gpt-image-1.5/edit': 4,
-};
+const WIZ_MAX_IMAGES = EDIT_MAX_IMAGES;
 function wizMaxImages() {
-  const m = qs('toolsModel') ? qs('toolsModel').value : 'nano-banana-2/edit';
-  return WIZ_MAX_IMAGES[m] || 4;
+  const m = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
+  return WIZ_MAX_IMAGES[m] || WIZ_MAX_IMAGES[DEFAULT_TOOLS_MODEL] || 4;
 }
-
 // --- Translated chip data ---
 const WIZ_TITLE_CHIPS = {
   en: ['Premium Quality','Best Seller','New Season','Best Choice','Top Sales','Ideal Gift','Maximum Comfort','Stylish Design'],
@@ -2390,6 +4908,7 @@ window.wizUpdateGenBtn = wizUpdateGenBtn;
 function updateWizImgStrip() {
   const strip = qs('wizImgStrip');
   if (!strip) return;
+  clearPreviewBlobUrls(strip);
   strip.innerHTML = '';
   if (uploadedToolsImages.length === 0 || _wizStep === 0) return;
 
@@ -2397,7 +4916,7 @@ function updateWizImgStrip() {
     const thumb = document.createElement('div');
     thumb.className = 'wiz-img-thumb';
     const img = document.createElement('img');
-    img.src = URL.createObjectURL(file);
+    img.src = getPreviewSrcForAssetItem(file, strip);
     thumb.appendChild(img);
 
     const acts = document.createElement('div');
@@ -2431,10 +4950,12 @@ const TITLE_PRESETS_KEY = 'nano_title_presets';
 const CHAR_PRESETS_KEY  = 'nano_char_presets';
 
 function _getStoreForKey(key) {
-  try { return JSON.parse(localStorage.getItem(key) || '{}'); } catch(_) { return {}; }
+  const scopedKey = getScopedStorageKey(key);
+  try { return JSON.parse(localStorage.getItem(scopedKey) || '{}'); } catch(_) { return {}; }
 }
 function _saveStoreForKey(key, store) {
-  try { localStorage.setItem(key, JSON.stringify(store)); } catch(_) {}
+  try { localStorage.setItem(getScopedStorageKey(key), JSON.stringify(store)); } catch(_) {}
+  if (key === TITLE_PRESETS_KEY || key === CHAR_PRESETS_KEY) queueAccountTextPresetSync();
 }
 function _getLangData(key, lang) {
   const store = _getStoreForKey(key);
@@ -2794,7 +5315,7 @@ window.wizQuickChar = wizQuickChar;
 
 // --- Model-aware settings visibility ---
 function wizUpdateToolsSettings() {
-  const model = qs('toolsModel') ? qs('toolsModel').value : 'nano-banana-2/edit';
+  const model = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
   const isNano2 = model === 'nano-banana-2/edit';
   const isNanoPro = model === 'nano-banana-pro/edit';
   const isGpt = model === 'gpt-image-1.5/edit';
@@ -2838,13 +5359,21 @@ function wizAutoResize(el) {
   el.style.height = el.scrollHeight + 'px';
 }
 
+function autoResizePromptInput() {
+  const promptInput = qs('promptInput');
+  if (!promptInput) return;
+  wizAutoResize(promptInput);
+}
+
 // Delegate auto-resize to all .wiz-input-grow and .wiz-char-input textareas
 document.addEventListener('input', (e) => {
   const t = e.target;
-  if (t && (t.classList.contains('wiz-input-grow') || t.classList.contains('wiz-char-input'))) {
+  if (t && (t.id === 'promptInput' || t.classList.contains('wiz-input-grow') || t.classList.contains('wiz-char-input'))) {
     wizAutoResize(t);
   }
 });
+
+window.addEventListener('resize', autoResizePromptInput);
 
 // --- Simplified char items (no inline select) ---
 function toolsAddChar(prefill) {
@@ -2892,6 +5421,7 @@ function updateToolsImagePreview() {
   const grid = qs('toolsImagePreviewGrid');
   const label = qs('toolsImageLabel');
   if (!grid) return;
+  clearPreviewBlobUrls(grid);
   grid.innerHTML = '';
   if (label) label.textContent = uploadedToolsImages.length > 0
     ? `${uploadedToolsImages.length} image(s)` : (window.I18N ? I18N.t('wiz_upload_text') : 'Click or drag product images');
@@ -2901,8 +5431,8 @@ function updateToolsImagePreview() {
     item.className = 'upload-preview-item';
     item.style.position = 'relative';
     const img = document.createElement('img');
-    img.src = URL.createObjectURL(file);
-    img.alt = file.name;
+    img.src = getPreviewSrcForAssetItem(file, grid);
+    img.alt = getAssetItemName(file, 'image');
     item.appendChild(img);
 
     // Number badge
@@ -2935,7 +5465,7 @@ function updateToolsImagePreview() {
 
 // ---- DESIGN INSPIRATION ----
 let _wizInspoPresets = [];         // built-in presets from presets.json
-let _wizCustomPresets = [];        // user-added presets {id, name, dataUrl, addedAt}
+let _wizCustomPresets = [];        // user-added presets {id, name, dataUrl|src, addedAt|createdAt, storagePath}
 let _wizSelectedPresets = new Set();
 let _wizHiddenBuiltins = new Set(); // built-in preset IDs hidden by user
 let _wizPresetNameOverrides = {};   // {presetId: overriddenName}
@@ -2944,6 +5474,7 @@ let uploadedInspoImages = [];       // kept for backwards compat
 // --- Storage keys ---
 const INSPO_HIDDEN_KEY  = 'nano_inspo_hidden';
 const INSPO_NAMES_KEY   = 'nano_inspo_names';
+const INSPO_STATE_META_KEY = 'nano_inspo_state_meta';
 const INSPO_IDB_NAME    = 'nano_custom_presets_db';
 const INSPO_IDB_STORE   = 'presets';
 
@@ -2959,12 +5490,67 @@ function _inspoIdbOpen() {
     req.onerror  = () => reject(req.error);
   });
 }
+function getInspoPresetOwnerKey(explicitScope) {
+  const scope = explicitScope === undefined ? getActiveAccountStorageScope() : explicitScope;
+  return scope ? String(scope) : '__guest__';
+}
+
+function normalizeInspoStateMeta(raw) {
+  return {
+    updatedAt: Number.isFinite(Number(raw && raw.updatedAt)) ? Number(raw.updatedAt) : 0,
+    lastSyncedAt: Number.isFinite(Number(raw && raw.lastSyncedAt)) ? Number(raw.lastSyncedAt) : 0,
+    dirty: !!(raw && raw.dirty),
+  };
+}
+
+function readInspoLocalStateMeta(explicitScope) {
+  return normalizeInspoStateMeta(readStoredJson(getScopedStorageKey(INSPO_STATE_META_KEY, explicitScope), {}));
+}
+
+function writeInspoLocalStateMeta(meta, explicitScope) {
+  try {
+    localStorage.setItem(
+      getScopedStorageKey(INSPO_STATE_META_KEY, explicitScope),
+      JSON.stringify(normalizeInspoStateMeta(meta)),
+    );
+  } catch (_) {}
+}
+
+function markInspoLocalStateDirty(explicitScope) {
+  const current = readInspoLocalStateMeta(explicitScope);
+  writeInspoLocalStateMeta({
+    updatedAt: Date.now(),
+    lastSyncedAt: current.lastSyncedAt || 0,
+    dirty: true,
+  }, explicitScope);
+}
+
+function markInspoLocalStateClean(explicitScope) {
+  const current = readInspoLocalStateMeta(explicitScope);
+  writeInspoLocalStateMeta({
+    updatedAt: current.updatedAt || Date.now(),
+    lastSyncedAt: Date.now(),
+    dirty: false,
+  }, explicitScope);
+}
+
+function hasDesignPresetStateContent(state) {
+  const nextState = state || {};
+  return !!(
+    (Array.isArray(nextState.hiddenBuiltins) && nextState.hiddenBuiltins.length > 0)
+    || (nextState.nameOverrides && typeof nextState.nameOverrides === 'object' && Object.keys(nextState.nameOverrides).length > 0)
+    || (Array.isArray(nextState.customPresets) && nextState.customPresets.length > 0)
+  );
+}
+
 async function _inspoIdbSave(preset) {
   const db = await _inspoIdbOpen();
+  const nextPreset = { ...preset, ownerKey: preset && preset.ownerKey ? preset.ownerKey : getInspoPresetOwnerKey() };
   return new Promise((res, rej) => {
     const tx = db.transaction(INSPO_IDB_STORE, 'readwrite');
-    tx.objectStore(INSPO_IDB_STORE).put(preset);
-    tx.oncomplete = res; tx.onerror = rej;
+    tx.objectStore(INSPO_IDB_STORE).put(nextPreset);
+    tx.oncomplete = () => { queueAccountDesignPresetSync(); res(); };
+    tx.onerror = rej;
   });
 }
 async function _inspoIdbDelete(id) {
@@ -2972,29 +5558,59 @@ async function _inspoIdbDelete(id) {
   return new Promise((res, rej) => {
     const tx = db.transaction(INSPO_IDB_STORE, 'readwrite');
     tx.objectStore(INSPO_IDB_STORE).delete(id);
-    tx.oncomplete = res; tx.onerror = rej;
+    tx.oncomplete = () => { queueAccountDesignPresetSync(); res(); };
+    tx.onerror = rej;
   });
 }
-async function _inspoIdbLoadAll() {
+async function _inspoIdbLoadAll(explicitOwnerKey) {
   const db = await _inspoIdbOpen();
   return new Promise((res, rej) => {
     const tx = db.transaction(INSPO_IDB_STORE, 'readonly');
     const req = tx.objectStore(INSPO_IDB_STORE).getAll();
-    req.onsuccess = () => res(req.result || []);
+    req.onsuccess = () => {
+      const ownerKey = getInspoPresetOwnerKey(explicitOwnerKey);
+      const items = Array.isArray(req.result) ? req.result : [];
+      res(items.filter((item) => getInspoPresetOwnerKey(item && item.ownerKey ? item.ownerKey : null) === ownerKey));
+    };
     req.onerror = rej;
   });
 }
-
+async function _inspoIdbReplaceAllForOwner(ownerKey, presets) {
+  const db = await _inspoIdbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(INSPO_IDB_STORE, 'readwrite');
+    const store = tx.objectStore(INSPO_IDB_STORE);
+    const req = store.getAll();
+    req.onsuccess = () => {
+      const all = Array.isArray(req.result) ? req.result : [];
+      all.forEach((item) => {
+        if (getInspoPresetOwnerKey(item && item.ownerKey ? item.ownerKey : null) === ownerKey) {
+          store.delete(item.id);
+        }
+      });
+      (presets || []).forEach((preset) => {
+        store.put({ ...preset, ownerKey });
+      });
+    };
+    req.onerror = rej;
+    tx.oncomplete = res;
+    tx.onerror = rej;
+  });
+}
 // --- localStorage helpers ---
 function inspoLoadLocalMeta() {
-  try { _wizHiddenBuiltins = new Set(JSON.parse(localStorage.getItem(INSPO_HIDDEN_KEY) || '[]')); } catch(_) { _wizHiddenBuiltins = new Set(); }
-  try { _wizPresetNameOverrides = JSON.parse(localStorage.getItem(INSPO_NAMES_KEY) || '{}'); } catch(_) { _wizPresetNameOverrides = {}; }
+  try { _wizHiddenBuiltins = new Set(JSON.parse(localStorage.getItem(getScopedStorageKey(INSPO_HIDDEN_KEY)) || '[]')); } catch(_) { _wizHiddenBuiltins = new Set(); }
+  try { _wizPresetNameOverrides = JSON.parse(localStorage.getItem(getScopedStorageKey(INSPO_NAMES_KEY)) || '{}'); } catch(_) { _wizPresetNameOverrides = {}; }
 }
-function inspoSaveLocalMeta() {
+function inspoSaveLocalMeta(options = {}) {
   try {
-    localStorage.setItem(INSPO_HIDDEN_KEY, JSON.stringify([..._wizHiddenBuiltins]));
-    localStorage.setItem(INSPO_NAMES_KEY, JSON.stringify(_wizPresetNameOverrides));
+    localStorage.setItem(getScopedStorageKey(INSPO_HIDDEN_KEY), JSON.stringify([..._wizHiddenBuiltins]));
+    localStorage.setItem(getScopedStorageKey(INSPO_NAMES_KEY), JSON.stringify(_wizPresetNameOverrides));
   } catch(_) {}
+  if (options.markDirty !== false) {
+    markInspoLocalStateDirty(options.explicitScope);
+  }
+  queueAccountDesignPresetSync();
 }
 
 // --- Load everything and render ---
@@ -3021,7 +5637,7 @@ function wizRenderInspoPresets() {
   const visibleBuiltins = _wizInspoPresets.filter(p => p.thumb && !_wizHiddenBuiltins.has(p.id));
   const allCards = [
     ...visibleBuiltins.map(p => ({ id: p.id, name: _wizPresetNameOverrides[p.id] || p.name || '', src: p.thumb, isCustom: false })),
-    ..._wizCustomPresets.map(p => ({ id: p.id, name: _wizPresetNameOverrides[p.id] || p.name || '', src: p.dataUrl, isCustom: true })),
+    ..._wizCustomPresets.map(p => ({ id: p.id, name: _wizPresetNameOverrides[p.id] || p.name || '', src: p.src || p.dataUrl, isCustom: true })),
   ];
 
   allCards.forEach(p => {
@@ -3155,6 +5771,7 @@ function inspoShowNameModal(dataUrl, suggestedName) {
     const preset = { id, name, dataUrl, addedAt: Date.now() };
     _wizCustomPresets.push(preset);
     try { await _inspoIdbSave(preset); } catch(e) { console.warn('Failed to save preset to IDB', e); }
+    markInspoLocalStateDirty();
     cancel.onclick();
     wizRenderInspoPresets();
     saveAppState();
@@ -3182,7 +5799,11 @@ function inspoStartRename(id, nameEl, isCustom) {
     if (!save) return;
     if (isCustom) {
       const cp = _wizCustomPresets.find(p => p.id === id);
-      if (cp) { cp.name = newName; try { await _inspoIdbSave(cp); } catch(_) {} }
+      if (cp) {
+        cp.name = newName;
+        try { await _inspoIdbSave(cp); } catch(_) {}
+        markInspoLocalStateDirty();
+      }
     } else {
       _wizPresetNameOverrides[id] = newName;
       inspoSaveLocalMeta();
@@ -3203,6 +5824,7 @@ async function inspoDeletePreset(id, isCustom) {
     const idx = _wizCustomPresets.findIndex(p => p.id === id);
     if (idx !== -1) _wizCustomPresets.splice(idx, 1);
     try { await _inspoIdbDelete(id); } catch(e) { console.warn('Failed to delete preset from IDB', e); }
+    markInspoLocalStateDirty();
   } else {
     _wizHiddenBuiltins.add(id);
     inspoSaveLocalMeta();
@@ -3243,7 +5865,7 @@ function getInspoPresetUrls() {
       return;
     }
     const custom = _wizCustomPresets.find(x => x.id === id);
-    if (custom && custom.dataUrl) urls.push(custom.dataUrl);
+    if (custom && (custom.src || custom.dataUrl)) urls.push(custom.src || custom.dataUrl);
   });
   return urls;
 }
@@ -3268,6 +5890,13 @@ function assembleWbCardPrompt(productImageCount) {
   const totalInspoCount = inspoPresetCount + inspoUploadCount;
   const prodCount = productImageCount || 0;
   const hasInspo = totalInspoCount > 0;
+  const alignBgWithProductStyle = !!(qs('toolsInspoMatchBg') && qs('toolsInspoMatchBg').checked);
+  const bgStyleHarmonyBlock = alignBgWithProductStyle
+    ? `
+
+═══ BACKGROUND STYLE ALIGNMENT (enabled) ═══
+Ensure the background, scene styling, color palette, props, and decorative details match the product's overall style, material character, and brand mood so the final card feels cohesive.`
+    : '';
 
   // ── WITH DESIGN REFERENCES: lean prompt — only user content + aesthetic directive ──
   if (hasInspo) {
@@ -3313,7 +5942,7 @@ CRITICAL: Every text element must appear EXACTLY ONCE \u2014 never duplicate lin
 \u2717 Logos, watermarks, Wildberries or WB brand marks anywhere
 
 \u2550\u2550\u2550 QUALITY \u2550\u2550\u2550
-ultra-sharp \u00b7 4K detail \u00b7 cinematic lighting \u00b7 premium composition \u00b7 masterpiece${wishes ? `\n\n\u2550\u2550\u2550 ADDITIONAL WISHES \u2550\u2550\u2550\n${wishes}` : ''}${textOverlays ? `\n\n\u2550\u2550\u2550 ADDITIONAL TEXT TO RENDER (reproduce exactly as written) \u2550\u2550\u2550\n${textOverlays}` : ''}`;
+ultra-sharp \u00b7 4K detail \u00b7 cinematic lighting \u00b7 premium composition \u00b7 masterpiece${bgStyleHarmonyBlock}${wishes ? `\n\n\u2550\u2550\u2550 ADDITIONAL WISHES \u2550\u2550\u2550\n${wishes}` : ''}${textOverlays ? `\n\n\u2550\u2550\u2550 ADDITIONAL TEXT TO RENDER (reproduce exactly as written) \u2550\u2550\u2550\n${textOverlays}` : ''}`;
   }
 
   // ── WITHOUT DESIGN REFERENCES: full default prompt ──
@@ -3374,34 +6003,34 @@ ${iconAndTypoBlock}
 \u2717 Logos, watermarks, Wildberries or WB brand marks anywhere
 
 \u2550\u2550\u2550 QUALITY DIRECTIVES \u2550\u2550\u2550
-photorealistic \u00b7 award-winning product photography \u00b7 ultra-sharp focus on product \u00b7 4K detail \u00b7 cinematic lighting \u00b7 premium composition \u00b7 masterpiece \u00b7 high fidelity${imageRolesBlock}${wishes ? `\n\n\u2550\u2550\u2550 USER REQUESTS (important) \u2550\u2550\u2550\n${wishes}` : ''}${textOverlays ? `\n\n\u2550\u2550\u2550 ADDITIONAL TEXT TO RENDER (user specified \u2014 reproduce exactly as written) \u2550\u2550\u2550\n${textOverlays}` : ''}`;
+photorealistic \u00b7 award-winning product photography \u00b7 ultra-sharp focus on product \u00b7 4K detail \u00b7 cinematic lighting \u00b7 premium composition \u00b7 masterpiece \u00b7 high fidelity${imageRolesBlock}${bgStyleHarmonyBlock}${wishes ? `\n\n\u2550\u2550\u2550 USER REQUESTS (important) \u2550\u2550\u2550\n${wishes}` : ''}${textOverlays ? `\n\n\u2550\u2550\u2550 ADDITIONAL TEXT TO RENDER (user specified \u2014 reproduce exactly as written) \u2550\u2550\u2550\n${textOverlays}` : ''}`;
 }
 
 async function submitToolsRequest(task) {
-  const modelId = qs('toolsModel') ? qs('toolsModel').value : 'nano-banana-2/edit';
+  const modelId = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
   const isNano2 = modelId === 'nano-banana-2/edit';
   const isGpt = modelId === 'gpt-image-1.5/edit';
   const body = { model_id: modelId, prompt: task.prompt };
 
-  const imageUrls = [];
-  for (const f of uploadedToolsImages) {
-    const u = await uploadFileToBlob(f, 'tools-ref');
-    if (u) imageUrls.push(u);
-  }
+  const imageUrls = await resolveUploadItemUrls(uploadedToolsImages, 'tools-ref', task);
   const presetUrls = getInspoPresetUrls();
   for (const pUrl of presetUrls) {
     try {
+      if (canPassThroughRemoteUrl(pUrl)) {
+        imageUrls.push(pUrl.trim());
+        continue;
+      }
       const resp = await fetch(pUrl);
       if (!resp.ok) continue;
       const blob = await resp.blob();
       const ext = pUrl.split('.').pop().split('?')[0] || 'jpg';
       const file = new File([blob], `preset-${Date.now()}.${ext}`, { type: blob.type || 'image/jpeg' });
-      const u = await uploadFileToBlob(file, 'tools-inspo-preset');
+      const u = await uploadFileToFal(file, 'tools-inspo-preset', task);
       if (u) imageUrls.push(u);
     } catch (e) { console.warn('Preset upload failed:', pUrl, e); }
   }
   for (const f of uploadedInspoImages) {
-    const u = await uploadFileToBlob(f, 'tools-inspo');
+    const u = await uploadFileToFal(f, 'tools-inspo', task);
     if (u) imageUrls.push(u);
   }
   if (imageUrls.length > 0) body.image_urls = imageUrls;
@@ -3432,7 +6061,7 @@ async function submitToolsRequest(task) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await createResponseError(res, 'Image generation failed');
   return await res.json();
 }
 
@@ -3448,12 +6077,12 @@ let SK = {
   layers: [], activeLayerId: null, layerCounter: 0,
 };
 
-function openSketchEditor(imageIndex, sourceArr, updateFn) {
+async function openSketchEditor(imageIndex, sourceArr, updateFn) {
   SK.imgIndex = imageIndex;
   SK.sourceArray = sourceArr || uploadedToolsImages;
   SK.updateFn = updateFn || updateToolsImagePreview;
-  const file = SK.sourceArray[imageIndex];
-  if (!file) return;
+  const sourceItem = SK.sourceArray[imageIndex];
+  if (!sourceItem) return;
   const modal = qs('sketchModal');
   if (!modal) return;
   modal.style.display = 'flex';
@@ -3463,6 +6092,15 @@ function openSketchEditor(imageIndex, sourceArr, updateFn) {
 
   const canvas = qs('sketchCanvas');
   if (!canvas) return;
+  let file = sourceItem;
+  try {
+    file = await ensureFileLikeAssetItem(sourceItem);
+  } catch (error) {
+    console.error('Failed to load asset for sketch editor', error);
+    closeSketchEditor();
+    showToast(getI18nText('drop_fetch_asset_failed', 'Failed to load the dragged asset.'), 'error');
+    return;
+  }
   const img = new Image();
   const imgUrl = URL.createObjectURL(file);
   img.onload = () => {
@@ -4361,6 +6999,10 @@ function openMediaModal(item) {
     body.appendChild(img);
   }
 
+  bindAssetDragSource(body, item);
+  const modalMedia = body.querySelector('img, video');
+  if (modalMedia) bindAssetDragSource(modalMedia, item, { badge: false });
+
   modal.style.display = 'flex';
   document.body.style.overflow = 'hidden';
 
@@ -4376,7 +7018,10 @@ function closeMediaModal() {
   const dl = qs('mediaModalDownload');
   const modalAssetBtn = qs('mediaModalUseAsset');
   const modalReuseBtn = qs('mediaModalReuse');
-  if (body) body.innerHTML = '';
+  if (body) {
+    bindAssetDragSource(body, null);
+    body.innerHTML = '';
+  }
   if (dl) dl.style.display = 'none';
   if (modalAssetBtn) modalAssetBtn.style.display = 'none';
   if (modalReuseBtn) modalReuseBtn.style.display = 'none';
@@ -4416,6 +7061,25 @@ function debounce(fn, ms) {
   };
 }
 
+const MAX_HISTORY_RENDER = 100; // cap rendered items for performance
+const HISTORY_SEARCH_DEBOUNCE_MS = 140;
+let _historyControlsBound = false;
+let _historySearchInputHandler = null;
+
+function getHistoryFilterConfig(filterId = historyViewState.type) {
+  return HISTORY_FILTERS.find((filter) => filter.id === filterId) || HISTORY_FILTERS[0];
+}
+
+function getHistoryPromptText(item) {
+  return item && item.prompt ? String(item.prompt).trim() : '';
+}
+
+function getHistoryFallbackLabel(item) {
+  if (item && item.type === 'video') return i18nText('opt_video', 'Video');
+  if (item && item.type === '3d') return i18nText('tab_3d', '3D');
+  return i18nText('opt_image', 'Image');
+}
+
 // Get appropriate thumbnail for history item — prefer small thumbnailUrl over full-res url
 function getHistoryThumb(item) {
   if (item.type === 'video') {
@@ -4425,40 +7089,288 @@ function getHistoryThumb(item) {
     return item.thumbnailUrl || item.url || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><path fill="#fff" d="M32 16L48 26V42L32 52L16 42V26L32 16Z" stroke="#fff" stroke-width="2" fill="none"/></svg>')}`;
   }
   // For images: prefer the small thumbnailUrl data URI over the full-res url
-  return item.thumbnailUrl || item.url || '';
+  return item.thumbnailUrl || item.url || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><path fill="#fff" d="M15 45L26 31L34 39L43 28L52 45H15Z" opacity="0.9"/><circle cx="24" cy="21" r="5" fill="#fff" opacity="0.95"/></svg>')}`;
 }
 
-const MAX_HISTORY_RENDER = 100; // cap rendered items for performance
+function getHistoryQueryTerms(query) {
+  return String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+}
+
+function matchesHistoryFilter(item, filterId) {
+  const filter = getHistoryFilterConfig(filterId);
+  return !filter.types || filter.types.includes(item.type);
+}
+
+function isHistoryViewFiltered() {
+  return getHistoryFilterConfig().id !== HISTORY_FILTERS[0].id || getHistoryQueryTerms(historyViewState.query).length > 0;
+}
+
+function getFilteredHistoryItems() {
+  const terms = getHistoryQueryTerms(historyViewState.query);
+
+  return history.reduce((items, item, index) => {
+    if (!item) return items;
+    if (!matchesHistoryFilter(item, historyViewState.type)) return items;
+
+    if (terms.length > 0) {
+      const prompt = getHistoryPromptText(item).toLowerCase();
+      if (!terms.every((term) => prompt.includes(term))) return items;
+    }
+
+    items.push({ item, index });
+    return items;
+  }, []);
+}
+
+const historyThumbnailPendingKeys = new Set();
+const historyThumbnailQueue = [];
+let historyThumbnailTimer = null;
+let historyThumbnailRunning = false;
+
+function queueHistoryThumbnailForItem(item, index = 0) {
+  if (!canGenerateClientHistoryThumbnail(item)) return;
+  const key = getHistoryIdentityKey(item, index);
+  if (!key || historyThumbnailPendingKeys.has(key)) return;
+  historyThumbnailPendingKeys.add(key);
+  historyThumbnailQueue.push({ item, key });
+  if (!historyThumbnailTimer && !historyThumbnailRunning) {
+    historyThumbnailTimer = setTimeout(processHistoryThumbnailQueue, 60);
+  }
+}
+
+function queueVisibleHistoryThumbnails(entries) {
+  (Array.isArray(entries) ? entries : []).forEach((entry, index) => {
+    if (!entry || !entry.item) return;
+    queueHistoryThumbnailForItem(entry.item, Number.isFinite(Number(entry.index)) ? Number(entry.index) : index);
+  });
+}
+
+async function processHistoryThumbnailQueue() {
+  historyThumbnailTimer = null;
+  if (shouldSkipClientHistoryThumbnailWork()) return;
+  if (historyThumbnailRunning) return;
+  historyThumbnailRunning = true;
+  let changed = false;
+  let processed = 0;
+
+  while (historyThumbnailQueue.length > 0 && processed < 2) {
+    const work = historyThumbnailQueue.shift();
+    if (!work || !work.item) continue;
+    const { item, key } = work;
+    try {
+      let thumb = null;
+      if (item.type === 'video') {
+        thumb = await generateVideoThumbnail(item.url);
+      }
+      if (thumb && !item.thumbnailUrl) {
+        item.thumbnailUrl = thumb;
+        changed = true;
+      }
+    } catch (_) {
+      // Ignore thumbnail generation failures and keep the lightweight placeholder.
+    } finally {
+      historyThumbnailPendingKeys.delete(key);
+    }
+    processed += 1;
+  }
+
+  historyThumbnailRunning = false;
+  if (changed) {
+    _pendingHistorySave = true;
+    debouncedSaveHistory();
+    scheduleHistoryUIUpdate();
+    if (_fhgState.open) renderFhgGallery();
+  }
+  if (historyThumbnailQueue.length > 0 && !historyThumbnailTimer) {
+    historyThumbnailTimer = setTimeout(processHistoryThumbnailQueue, 90);
+  }
+}
+
+function setHistoryHydrating(loading) {
+  const next = !!loading;
+  if (historyHydrating === next) return;
+  historyHydrating = next;
+  scheduleHistoryUIUpdate();
+  if (_fhgState.open) renderFhgGallery();
+}
+
+function appendHistoryMetaLoading(text) {
+  if (!historyHydrating) return text;
+  const loadingText = i18nText('history_syncing', 'Syncing history...');
+  return text ? `${text} · ${loadingText}` : loadingText;
+}
+function updateHistorySearchUi(inputValue = null) {
+  const searchInput = qs('historySearchInput');
+  const clearBtn = qs('historySearchClear');
+  const rawValue = inputValue !== null ? String(inputValue) : (searchInput ? searchInput.value : String(historyViewState.query || ''));
+
+  if (searchInput && inputValue === null && searchInput.value !== historyViewState.query) {
+    searchInput.value = historyViewState.query || '';
+  }
+  if (clearBtn) clearBtn.hidden = rawValue.length === 0;
+}
+
+function updateHistoryFilterUi() {
+  const filterBar = qs('historyFilterBar');
+  if (!filterBar) return;
+
+  const activeId = getHistoryFilterConfig().id;
+  filterBar.querySelectorAll('[data-history-filter]').forEach((btn) => {
+    const isActive = btn.dataset.historyFilter === activeId;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+}
+
+function clearHistorySearch(shouldFocus = false) {
+  const searchInput = qs('historySearchInput');
+  if (searchInput) searchInput.value = '';
+  historyViewState.query = '';
+  updateHistorySearchUi('');
+  if (_historyRendered) updateHistoryUI();
+  if (shouldFocus && searchInput) searchInput.focus();
+}
+
+function initHistoryControls() {
+  if (_historyControlsBound) return;
+
+  const searchInput = qs('historySearchInput');
+  const clearBtn = qs('historySearchClear');
+  const filterBar = qs('historyFilterBar');
+  if (!searchInput || !clearBtn || !filterBar) return;
+
+  if (!_historySearchInputHandler) {
+    _historySearchInputHandler = debounce(() => {
+      historyViewState.query = searchInput.value || '';
+      if (_historyRendered) updateHistoryUI();
+    }, HISTORY_SEARCH_DEBOUNCE_MS);
+  }
+
+  searchInput.addEventListener('input', () => {
+    updateHistorySearchUi(searchInput.value || '');
+    _historySearchInputHandler();
+  });
+
+  searchInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && searchInput.value) {
+      event.preventDefault();
+      clearHistorySearch(true);
+    }
+  });
+
+  clearBtn.addEventListener('click', () => clearHistorySearch(true));
+
+  filterBar.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-history-filter]');
+    if (!btn) return;
+
+    const nextFilter = getHistoryFilterConfig(btn.dataset.historyFilter).id;
+    if (historyViewState.type === nextFilter) return;
+
+    historyViewState.type = nextFilter;
+    updateHistoryUI();
+  });
+
+  _historyControlsBound = true;
+  updateHistoryFilterUi();
+  updateHistorySearchUi();
+}
+
+function formatHistoryMeta(totalCount, shownCount) {
+  if (totalCount === 0 && !isHistoryViewFiltered()) return '';
+
+  if (isHistoryViewFiltered()) {
+    if (totalCount > shownCount) {
+      return i18nText('history_results_matches_capped', 'Showing {shown} of {count} matches')
+        .replace('{shown}', shownCount)
+        .replace('{count}', totalCount);
+    }
+    return i18nText('history_results_matches', '{count} matches').replace('{count}', totalCount);
+  }
+
+  if (history.length > shownCount) {
+    return i18nText('history_results_total_capped', 'Showing {shown} of {count} items')
+      .replace('{shown}', shownCount)
+      .replace('{count}', history.length);
+  }
+
+  return i18nText('history_results_total', '{count} items').replace('{count}', history.length);
+}
+
+function updateHistoryEmptyState(emptyEl, textEl, message) {
+  if (textEl) textEl.textContent = message;
+  emptyEl.style.display = 'flex';
+}
 
 function updateHistoryUI() {
   const list = qs('historyList');
   const empty = qs('emptyHistory');
-  if (!list || !empty) return;
+  const emptyText = qs('emptyHistoryText');
+  const meta = qs('historyResultsMeta');
+  const searchInput = qs('historySearchInput');
+  if (!list || !empty || !emptyText || !meta) return;
+
+  if (searchInput && searchInput.value !== historyViewState.query) {
+    historyViewState.query = searchInput.value || '';
+  }
+
+  updateHistoryFilterUi();
+  updateHistorySearchUi();
 
   if (!history || history.length === 0) {
     list.innerHTML = '';
-    empty.style.display = 'flex';
+    meta.textContent = appendHistoryMetaLoading('');
+    updateHistoryEmptyState(
+      empty,
+      emptyText,
+      historyHydrating
+        ? i18nText('history_loading', 'Loading history...')
+        : i18nText('history_empty', 'No creations yet')
+    );
     return;
   }
-  empty.style.display = 'none';
 
-  const renderCount = Math.min(history.length, MAX_HISTORY_RENDER);
+  const filteredHistory = getFilteredHistoryItems();
+  const renderItems = filteredHistory.slice(0, MAX_HISTORY_RENDER);
+  meta.textContent = appendHistoryMetaLoading(formatHistoryMeta(filteredHistory.length, renderItems.length));
+
+  if (filteredHistory.length === 0) {
+    list.innerHTML = '';
+    updateHistoryEmptyState(empty, emptyText, i18nText('history_empty_filtered', 'No history items match the current search or filter'));
+    return;
+  }
+
+  empty.style.display = 'none';
 
   // Build HTML string — much faster than N createElement + innerHTML calls
   const parts = [];
-  for (let idx = 0; idx < renderCount; idx++) {
-    const item = history[idx];
+  for (const entry of renderItems) {
+    const item = entry.item;
+    const idx = entry.index;
     const icon = item.type === 'video' ? 'play' : (item.type === '3d' ? 'box' : 'image');
     const thumbSrc = getHistoryThumb(item);
-    const promptText = item.prompt || (item.type === '3d' ? '3D Model' : (item.type === 'video' ? 'Video' : 'Image'));
+    const promptText = getHistoryPromptText(item) || getHistoryFallbackLabel(item);
+    const timeText = item && item.timestamp
+      ? new Date(item.timestamp).toLocaleTimeString(window.I18N ? I18N.lang : undefined)
+      : '';
 
-    parts.push(`<div class="history-item" data-index="${idx}"><div class="history-content"><div class="history-thumb-wrap"><img src="${escapeHtml(thumbSrc)}" class="history-thumb" loading="lazy" alt=""><div class="history-icon">${_hIcon(icon)}</div></div><div class="history-info"><div class="history-prompt">${escapeHtml(promptText)}</div><div class="history-time">${new Date(item.timestamp).toLocaleTimeString()}</div></div></div><div class="history-actions"><button class="history-action-btn" data-action="reuse" title="Reuse Prompt & Settings">${_hIcon('repeat-2')}</button><button class="history-action-btn" data-action="use-asset" title="Use as Asset">${_hIcon('package-plus')}</button><button class="history-action-btn" data-action="download" title="Download">${_hIcon('download')}</button><button class="history-action-btn history-action-btn--danger" data-action="delete" title="Delete">${_hIcon('trash-2')}</button></div></div>`);
+    parts.push(`<div class="history-item" data-index="${idx}"><div class="history-content"><div class="history-thumb-wrap"><img src="${escapeHtml(thumbSrc)}" class="history-thumb" loading="lazy" decoding="async" draggable="false" alt=""><div class="history-icon">${_hIcon(icon)}</div></div><div class="history-info"><div class="history-prompt">${escapeHtml(promptText)}</div><div class="history-time">${escapeHtml(timeText)}</div></div></div><div class="history-actions"><button class="history-action-btn" data-action="reuse" title="Reuse Prompt & Settings">${_hIcon('repeat-2')}</button><button class="history-action-btn" data-action="use-asset" title="Use as Asset">${_hIcon('package-plus')}</button><button class="history-action-btn" data-action="download" title="Download">${_hIcon('download')}</button><button class="history-action-btn history-action-btn--danger" data-action="delete" title="Delete">${_hIcon('trash-2')}</button></div></div>`);
   }
 
   list.innerHTML = parts.join('');
 
   // Single event listener for all history items (event delegation)
   list.onclick = handleHistoryClick;
+  list.querySelectorAll('.history-thumb-wrap').forEach((thumb) => {
+    const itemEl = thumb.closest('.history-item');
+    const idx = itemEl ? Number(itemEl.dataset.index) : -1;
+    bindAssetDragSource(thumb, idx >= 0 ? history[idx] : null, {
+      onDragStart: closeHistoryDrawerDuringNativeDrag,
+      onDragEnd: finalizeHistoryDrawerAfterNativeDrag,
+      onTouchDragStart: closeHistoryDrawerDuringTouchDrag,
+    });
+  });
+  queueVisibleHistoryThumbnails(renderItems);
 
   // No lucide.createIcons() needed — all icons are inline SVGs
 }
@@ -4466,9 +7378,9 @@ function updateHistoryUI() {
 function handleHistoryClick(e) {
   const actionBtn = e.target.closest('.history-action-btn');
   const historyItem = e.target.closest('.history-item');
-  
+
   if (!historyItem) return;
-  
+
   const idx = parseInt(historyItem.dataset.index, 10);
   if (isNaN(idx) || idx < 0 || idx >= history.length) return;
 
@@ -4492,13 +7404,13 @@ function handleHistoryClick(e) {
   // Click on item itself - display it
   const item = history[idx];
   if (!item) return;
-  
+
   exitWizFullscreen();
   galleryItems = [item];
   galleryIndex = 0;
   currentPreview = item;
   displayResult(item);
-  
+
   // Close drawer on mobile
   const drawer = qs('historyDrawer');
   const overlay = qs('drawerOverlay');
@@ -4509,13 +7421,265 @@ function handleHistoryClick(e) {
 }
 
 function addToHistory(item) {
+  ensureHistoryItemIdentity(item);
   history.unshift(item);
   saveHistory();
   scheduleHistoryUIUpdate();
+  queueAccountHistoryPersist(item);
 }
+
+function createTaskHistoryItemId(task, suffix) {
+  const taskId = task && task.id ? String(task.id) : createHistoryClientId();
+  const safeSuffix = suffix ? String(suffix) : 'output';
+  return `task_${taskId}_${safeSuffix}`;
+}
+
+function buildTaskHistoryItem(task, type, url, options = {}) {
+  const suffix = options.suffix || (type === '3d' ? '3d' : 'output');
+  const meta = options.meta && typeof options.meta === 'object' ? { ...options.meta } : {};
+  meta.clientId = meta.clientId || createTaskHistoryItemId(task, suffix);
+  meta.taskId = meta.taskId || (task && task.id ? String(task.id) : null);
+  if (Number.isFinite(Number(options.outputIndex))) meta.outputIndex = Number(options.outputIndex);
+  return {
+    id: meta.clientId,
+    type,
+    url,
+    prompt: task && task.prompt ? task.prompt : '',
+    timestamp: Number.isFinite(Number(options.timestamp)) ? Number(options.timestamp) : Date.now(),
+    genCtx: task && task.genCtx ? task.genCtx : null,
+    meta,
+  };
+}
+
+// ===== FULLSCREEN HISTORY GALLERY =====
+let _fhgState = { filter: 'all', query: '', open: false, searchHandler: null };
+
+function openFullHistory() {
+  const el = qs('fullHistoryGallery');
+  if (!el) return;
+
+  // Close the side drawer first
+  const drawer = qs('historyDrawer');
+  const overlay = qs('drawerOverlay');
+  if (drawer) drawer.classList.remove('open');
+  if (overlay) overlay.classList.remove('open');
+
+  _fhgState.open = true;
+  _fhgState.filter = 'all';
+  _fhgState.query = '';
+  _fhgFirstRender = true;
+  el.style.display = 'flex';
+  el.classList.remove('fhg-closing');
+  document.body.style.overflow = 'hidden';
+  const grid = qs('fhgGrid');
+  if (grid) grid.classList.remove('fhg-no-anim');
+
+  // Reset search input and filter buttons
+  const searchInput = qs('fhgSearchInput');
+  if (searchInput) searchInput.value = '';
+  const filterBar = qs('fhgFilterBar');
+  if (filterBar) {
+    filterBar.querySelectorAll('.fhg-filter').forEach(b => b.classList.toggle('active', b.dataset.fhgFilter === 'all'));
+  }
+
+  // Re-apply i18n to gallery elements
+  if (window.I18N && typeof I18N.t === 'function') {
+    el.querySelectorAll('[data-i18n]').forEach(e => { e.textContent = I18N.t(e.dataset.i18n); });
+    el.querySelectorAll('[data-i18n-placeholder]').forEach(e => { e.placeholder = I18N.t(e.dataset.i18nPlaceholder); });
+  }
+
+  initFhgControls();
+  renderFhgGallery();
+
+  if (window.lucide && typeof window.lucide.createIcons === 'function') {
+    requestAnimationFrame(() => window.lucide.createIcons({ nameAttr: 'data-lucide' }));
+  }
+}
+window.openFullHistory = openFullHistory;
+
+function closeFullHistory() {
+  const el = qs('fullHistoryGallery');
+  if (!el) return;
+  _fhgState.open = false;
+  el.classList.add('fhg-closing');
+  document.body.style.overflow = '';
+  setTimeout(() => {
+    el.style.display = 'none';
+    el.classList.remove('fhg-closing');
+  }, 300);
+}
+window.closeFullHistory = closeFullHistory;
+
+let _fhgControlsBound = false;
+function initFhgControls() {
+  if (_fhgControlsBound) return;
+  const searchInput = qs('fhgSearchInput');
+  const filterBar = qs('fhgFilterBar');
+
+  if (searchInput) {
+    _fhgState.searchHandler = debounce(() => {
+      _fhgState.query = searchInput.value || '';
+      renderFhgGallery();
+    }, 160);
+    searchInput.addEventListener('input', _fhgState.searchHandler);
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && searchInput.value) {
+        e.preventDefault();
+        e.stopPropagation();
+        searchInput.value = '';
+        _fhgState.query = '';
+        renderFhgGallery();
+      }
+    });
+  }
+
+  if (filterBar) {
+    filterBar.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-fhg-filter]');
+      if (!btn) return;
+      const next = btn.dataset.fhgFilter;
+      if (_fhgState.filter === next) return;
+      _fhgState.filter = next;
+      filterBar.querySelectorAll('.fhg-filter').forEach(b => b.classList.toggle('active', b.dataset.fhgFilter === next));
+      renderFhgGallery();
+    });
+  }
+
+  _fhgControlsBound = true;
+}
+
+function getFhgFilteredItems() {
+  const terms = _fhgState.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  return history.reduce((out, item, index) => {
+    if (!item) return out;
+    if (!matchesHistoryFilter(item, _fhgState.filter)) return out;
+    if (terms.length > 0) {
+      const prompt = getHistoryPromptText(item).toLowerCase();
+      if (!terms.every(t => prompt.includes(t))) return out;
+    }
+    out.push({ item, index });
+    return out;
+  }, []);
+}
+
+let _fhgFirstRender = true;
+
+function renderFhgGallery() {
+  const grid = qs('fhgGrid');
+  const empty = qs('fhgEmpty');
+  const meta = qs('fhgMeta');
+  if (!grid) return;
+
+  // Skip animations on filter/search updates (not the first open)
+  const skipAnim = !_fhgFirstRender;
+  if (skipAnim) grid.classList.add('fhg-no-anim');
+
+  const filtered = getFhgFilteredItems();
+  const maxItems = 200;
+  const items = filtered.slice(0, maxItems);
+
+  if (meta) {
+    if (filtered.length === 0 && history.length === 0) {
+      meta.textContent = appendHistoryMetaLoading('');
+    } else if (filtered.length > maxItems) {
+      meta.textContent = appendHistoryMetaLoading((i18nText('history_results_matches_capped', 'Showing {shown} of {count} matches') || 'Showing {shown} of {count}')
+        .replace('{shown}', maxItems).replace('{count}', filtered.length));
+    } else {
+      meta.textContent = appendHistoryMetaLoading((i18nText('history_results_total', '{count} items') || '{count} items')
+        .replace('{count}', filtered.length));
+    }
+  }
+
+  if (items.length === 0) {
+    grid.innerHTML = '';
+    if (empty) {
+      empty.style.display = 'flex';
+      if (window.lucide && typeof window.lucide.createIcons === 'function') {
+        requestAnimationFrame(() => window.lucide.createIcons({ nameAttr: 'data-lucide' }));
+      }
+    }
+    _fhgFirstRender = false;
+    return;
+  }
+
+  if (empty) empty.style.display = 'none';
+
+  const parts = [];
+  for (const entry of items) {
+    const item = entry.item;
+    const idx = entry.index;
+    const icon = item.type === 'video' ? 'play' : (item.type === '3d' ? 'box' : 'image');
+    const thumbSrc = getHistoryThumb(item);
+    const promptText = getHistoryPromptText(item) || getHistoryFallbackLabel(item);
+    const timeText = item && item.timestamp
+      ? new Date(item.timestamp).toLocaleString(window.I18N ? I18N.lang : undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : '';
+
+    parts.push(
+      `<div class="fhg-card" data-index="${idx}">` +
+        `<img class="fhg-card-img" src="${escapeHtml(thumbSrc)}" loading="lazy" alt="">` +
+        `<div class="fhg-card-type">${_hIcon(icon)}</div>` +
+        `<div class="fhg-card-actions">` +
+          `<button class="fhg-card-action" data-action="download" title="Download">${_hIcon('download')}</button>` +
+          `<button class="fhg-card-action fhg-card-action--danger" data-action="delete" title="Delete">${_hIcon('trash-2')}</button>` +
+        `</div>` +
+        `<div class="fhg-card-info">` +
+          `<div class="fhg-card-prompt">${escapeHtml(promptText)}</div>` +
+          `<div class="fhg-card-time">${escapeHtml(timeText)}</div>` +
+        `</div>` +
+      `</div>`
+    );
+  }
+
+  grid.innerHTML = parts.join('');
+  grid.onclick = handleFhgClick;
+  queueVisibleHistoryThumbnails(items);
+  _fhgFirstRender = false;
+}
+
+function handleFhgClick(e) {
+  const actionBtn = e.target.closest('.fhg-card-action');
+  const card = e.target.closest('.fhg-card');
+  if (!card) return;
+
+  const idx = parseInt(card.dataset.index, 10);
+  if (isNaN(idx) || idx < 0 || idx >= history.length) return;
+
+  if (actionBtn) {
+    e.stopPropagation();
+    const action = actionBtn.dataset.action;
+    if (action === 'download') {
+      downloadFromHistory(idx, e);
+    } else if (action === 'delete') {
+      deleteFromHistory(idx, e);
+      renderFhgGallery();
+    }
+    return;
+  }
+
+  // Click on card: show it and close gallery
+  const item = history[idx];
+  if (!item) return;
+  exitWizFullscreen();
+  galleryItems = [item];
+  galleryIndex = 0;
+  currentPreview = item;
+  displayResult(item);
+  closeFullHistory();
+}
+
+// Escape key closes fullscreen gallery
+const _origKeydownForFhg = window.addEventListener('keydown', function _fhgEsc(e) {
+  if (e.key === 'Escape' && _fhgState.open) {
+    const searchInput = qs('fhgSearchInput');
+    if (searchInput && searchInput.value) return; // let search clear handler handle it
+    closeFullHistory();
+  }
+}, true);
 
 // Silent version: adds to array without triggering save/UI (for batch inserts)
 function addToHistorySilent(item) {
+  ensureHistoryItemIdentity(item);
   history.unshift(item);
 }
 
@@ -4547,9 +7711,11 @@ function scheduleHistoryUIUpdate() {
 
 function deleteFromHistory(index, event) {
   event.stopPropagation();
+  const removed = history[index] || null;
   history.splice(index, 1);
   saveHistory();
   updateHistoryUI();
+  if (removed) queueAccountHistoryDelete(removed);
 }
 window.deleteFromHistory = deleteFromHistory;
 
@@ -4590,6 +7756,7 @@ function displayResult(item) {
     if (model) model.style.display = 'none';
     if (vid) {
       vid.style.display = 'block';
+      vid.poster = item.thumbnailUrl || '';
       vid.src = item.url;
     }
     if (dl) {
@@ -4633,6 +7800,11 @@ function displayResult(item) {
   const editBtn = qs('editImageBtn');
   const isImage = item.type === 'image' || (!item.type);
   if (editBtn) editBtn.style.display = isImage ? 'inline-flex' : 'none';
+
+  const previewArea = qs('previewArea');
+  if (previewArea) bindAssetDragSource(previewArea, item);
+  if (img) bindAssetDragSource(img, item.type === 'image' ? item : null, { badge: false });
+  if (vid) bindAssetDragSource(vid, item.type === 'video' ? item : null, { badge: false });
 
   updateGalleryNav();
 
@@ -4708,23 +7880,94 @@ function updateGalleryNav() {
   }
 }
 
+const TASK_QUEUE_STALE_MS = 15 * 1000;
+const TASK_SUBMITTING_STALE_MS = 8 * 60 * 1000;
+const TASK_FAILED_VISIBLE_MS = 15 * 60 * 1000;
+
+function markTaskActivity(task) {
+  if (!task || typeof task !== 'object') return;
+  task.lastActivityAt = Date.now();
+}
+
+function normalizeTasksForDisplay() {
+  const now = Date.now();
+  let changed = false;
+  const seenIds = new Set();
+  const nextTasks = [];
+
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    if (!task || !task.id) {
+      changed = true;
+      continue;
+    }
+    if (seenIds.has(task.id)) {
+      changed = true;
+      continue;
+    }
+    seenIds.add(task.id);
+
+    const age = Math.max(0, now - (task.lastActivityAt || task.startedAt || task.createdAt || now));
+    if (task.status === 'QUEUED' && age > TASK_QUEUE_STALE_MS) {
+      task.status = 'FAILED';
+      task.failedAt = task.failedAt || now;
+      task.error = task.error || 'Interrupted - please try again';
+      changed = true;
+    }
+    if (task.status === 'SUBMITTING' && age > TASK_SUBMITTING_STALE_MS) {
+      task.status = 'FAILED';
+      task.failedAt = task.failedAt || now;
+      task.error = task.error || 'Task expired after being active too long. Please try again.';
+      changed = true;
+    }
+
+    const failedAge = Math.max(0, now - (task.failedAt || task.createdAt || now));
+    if (task.status === 'FAILED' && failedAge > TASK_FAILED_VISIBLE_MS) {
+      changed = true;
+      continue;
+    }
+
+    nextTasks.push(task);
+  }
+
+  if (changed) {
+    tasks = nextTasks;
+    saveTasks();
+  }
+}
+
 function removeTask(taskId) {
   if (pollTimers.has(taskId)) {
     clearTimeout(pollTimers.get(taskId));
     pollTimers.delete(taskId);
   }
-  const idx = tasks.findIndex((t) => t && t.id === taskId);
-  if (idx >= 0) {
-    tasks.splice(idx, 1);
-    saveTasks();
-    renderTasks();
-  }
+
+  const removedTasks = tasks.filter((t) => t && t.id === taskId);
+  if (!removedTasks.length) return;
+
+  tasks = tasks.filter((t) => !t || t.id !== taskId);
+  saveTasks();
+  renderTasks();
+
+  removedTasks.forEach((task) => {
+    if (!task || task.blobCleanupDone) return;
+    cleanupTaskUploads(task)
+      .then(() => {
+        if (task.blobCleanupError) {
+          console.warn('Task upload cleanup issue:', task.blobCleanupError);
+        }
+      })
+      .catch((e) => {
+        console.warn('Task upload cleanup failed:', e && e.message ? e.message : e);
+      });
+  });
 }
 window.removeTask = removeTask;
 
 function renderTasks() {
   const panel = qs('generationsPanel');
   if (!panel) return;
+
+  normalizeTasksForDisplay();
 
   const active = tasks.filter((t) => t && t.status && t.status !== 'COMPLETED');
   if (active.length === 0) {
@@ -4739,13 +7982,17 @@ function renderTasks() {
     .map((t) => {
       const age = Math.max(0, Date.now() - (t.startedAt || t.createdAt || Date.now()));
       const secs = (age / 1000).toFixed(1);
-      const status = escapeHtml(t.status);
+      const status = escapeHtml(getTaskStatusLabel(t.status));
       const prompt = escapeHtml((t.prompt || '').slice(0, 120));
-      const err = t.error ? `<div class="task-error">${escapeHtml(t.error)}</div>` : '';
+      const errText = formatErrorForDisplay(t.error || '');
+      const err = errText ? `<div class="task-error">${escapeHtml(errText)}</div>` : '';
       const isFailed = t.status === 'FAILED';
-      const canDismiss = isFailed || t.status === 'RUNNING' || t.status === 'SUBMITTING';
+      const canDismiss = t.status !== 'COMPLETED';
+      const actionLabel = isFailed
+        ? i18nText('task_action_dismiss', 'Dismiss')
+        : i18nText('task_action_cancel', 'Cancel');
       const removeBtn = canDismiss
-        ? `<button class="task-remove" onclick="removeTask('${t.id}')" title="${isFailed ? 'Dismiss' : 'Cancel'} task" aria-label="${isFailed ? 'Dismiss' : 'Cancel'} task">&times;</button>`
+        ? `<button class="task-remove" onclick="removeTask('${t.id}')" title="${escapeHtml(actionLabel)}" aria-label="${escapeHtml(actionLabel)}">&times;</button>`
         : '';
       return `
         <div class="task-card ${isFailed ? 'task-failed' : 'task-running'}">
@@ -4763,7 +8010,6 @@ function renderTasks() {
     })
     .join('');
 }
-
 async function readFileAsDataUri(file) {
   if (!file) return null;
   return new Promise((resolve, reject) => {
@@ -4858,18 +8104,23 @@ function extractMediaUrl(data, type) {
 
 function extractAllMediaUrls(data, type) {
   const urls = [];
+  const pushUnique = (url) => {
+    const next = String(url || '').trim();
+    if (!next || urls.includes(next)) return;
+    urls.push(next);
+  };
   if (type === 'video') {
-    if (data && data.video && data.video.url) urls.push(data.video.url);
+    if (data && data.video && data.video.url) pushUnique(data.video.url);
     if (Array.isArray(data && data.videos)) {
       for (const v of data.videos) {
-        if (v && v.url) urls.push(v.url);
+        if (v && v.url) pushUnique(v.url);
       }
     }
   } else {
-    if (data && data.image && data.image.url) urls.push(data.image.url);
+    if (data && data.image && data.image.url) pushUnique(data.image.url);
     if (Array.isArray(data && data.images)) {
       for (const img of data.images) {
-        if (img && img.url) urls.push(img.url);
+        if (img && img.url) pushUnique(img.url);
       }
     }
   }
@@ -4946,30 +8197,312 @@ function resolveMime(file) {
   return 'application/octet-stream';
 }
 
-async function uploadFileToBlob(file, folder) {
-  if (!file) return null;
+function ensureTaskUploadList(task) {
+  if (!task || typeof task !== 'object') return null;
+  if (!Array.isArray(task.uploadedBlobUrls)) {
+    task.uploadedBlobUrls = [];
+  }
+  return task.uploadedBlobUrls;
+}
 
-  const namePart = sanitizePathPart(file.name || 'upload');
-  const rand = Math.random().toString(16).slice(2);
-  const pathname = `${sanitizePathPart(folder || 'uploads')}/${Date.now()}-${rand}-${namePart}`;
+function registerTaskBlobUrl(task, url) {
+  if (!task || !url) return;
+  const list = ensureTaskUploadList(task);
+  if (!list) return;
+  // Keep only a tiny bounded record for legacy task compatibility.
+  if (!list.includes(url) && list.length < 4) list.push(url);
+}
 
-  let mod = null;
+async function cleanupTaskUploads(task) {
+  if (!task || typeof task !== 'object') return;
+  if (task.blobCleanupDone) return;
+
+  task.uploadedBlobUrls = [];
+  task.blobCleanupDone = true;
+  task.blobCleanupAt = Date.now();
+  task.blobCleanupError = null;
+}
+
+function isDirectRemoteUrl(value) {
+  return typeof value === 'string' && /^(https?:)?\/\//i.test(value.trim());
+}
+
+function canPassThroughRemoteUrl(value) {
+  if (!isDirectRemoteUrl(value)) return false;
   try {
-    mod = await import('https://esm.sh/@vercel/blob@0.27.0/client?bundle');
-  } catch {
-    mod = await import('https://esm.sh/@vercel/blob@0.27.0/client');
+    const url = new URL(String(value).trim(), window.location.href);
+    // Same-origin assets on this private app are not publicly reachable by Fal.
+    return url.origin !== window.location.origin;
+  } catch (_) {
+    return false;
+  }
+}
+
+const VIDEO_IMAGE_UPLOAD_FOLDERS = new Set([
+  'video-image',
+  'video-end-image',
+]);
+const VIDEO_IMAGE_UPLOAD_MAX_EDGE_PX = 2048;
+const VIDEO_IMAGE_UPLOAD_MAX_BYTES = 6 * 1024 * 1024;
+const VIDEO_IMAGE_UPLOAD_LARGE_BYTES = 4 * 1024 * 1024;
+
+function shouldOptimizeVideoUploadImage(file, folder) {
+  if (!file || !(file instanceof Blob)) return false;
+  if (!VIDEO_IMAGE_UPLOAD_FOLDERS.has(String(folder || ''))) return false;
+  const type = String(file.type || '').toLowerCase();
+  if (!type.startsWith('image/')) return false;
+  if (type.includes('svg')) return false;
+  return true;
+}
+
+function getOptimizedImageExtension(type, fallbackName = 'upload') {
+  const normalized = String(type || '').toLowerCase();
+  if (normalized === 'image/png') return '.png';
+  if (normalized === 'image/webp') return '.webp';
+  if (normalized === 'image/avif') return '.avif';
+  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return '.jpg';
+  const match = String(fallbackName || '').match(/(\.[a-z0-9]+)$/i);
+  return match ? match[1] : '.jpg';
+}
+
+function buildOptimizedImageFilename(name, type) {
+  const base = String(name || 'upload')
+    .replace(/(\.[a-z0-9]+)$/i, '')
+    .replace(/[^a-z0-9._-]+/gi, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'upload';
+  return `${base}${getOptimizedImageExtension(type, name)}`;
+}
+
+function createUploadCanvas(width, height) {
+  const safeWidth = Math.max(1, Math.round(Number(width) || 1));
+  const safeHeight = Math.max(1, Math.round(Number(height) || 1));
+  const canvas = document.createElement('canvas');
+  canvas.width = safeWidth;
+  canvas.height = safeHeight;
+  return canvas;
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    if (!canvas || typeof canvas.toBlob !== 'function') {
+      reject(new Error('Canvas export unavailable'));
+      return;
+    }
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('Canvas export failed'));
+    }, type, quality);
+  });
+}
+
+async function decodeImageForUpload(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bitmap = await createImageBitmap(file);
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        cleanup() {
+          if (typeof bitmap.close === 'function') bitmap.close();
+        },
+      };
+    } catch (_) {
+      // Fall back to Image element below.
+    }
   }
 
-  const upload = mod && typeof mod.upload === 'function' ? mod.upload : null;
-  if (!upload) throw new Error('Blob upload client not available');
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.decoding = 'async';
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Image decode failed'));
+      el.src = objectUrl;
+    });
+    return {
+      source: img,
+      width: img.naturalWidth || img.width || 0,
+      height: img.naturalHeight || img.height || 0,
+      cleanup() {
+        URL.revokeObjectURL(objectUrl);
+      },
+    };
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+}
 
-  const result = await upload(pathname, file, {
-    access: 'public',
-    handleUploadUrl: '/api/blob-upload',
-    contentType: resolveMime(file),
-  });
+function detectImageHasAlpha(source) {
+  try {
+    const sampleCanvas = createUploadCanvas(32, 32);
+    const ctx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return false;
+    ctx.clearRect(0, 0, sampleCanvas.width, sampleCanvas.height);
+    ctx.drawImage(source, 0, 0, sampleCanvas.width, sampleCanvas.height);
+    const pixels = ctx.getImageData(0, 0, sampleCanvas.width, sampleCanvas.height).data;
+    for (let i = 3; i < pixels.length; i += 4) {
+      if (pixels[i] < 250) return true;
+    }
+  } catch (_) {
+    return false;
+  }
+  return false;
+}
 
-  return result && result.url ? result.url : null;
+async function optimizeImageForVideoUpload(file, folder) {
+  if (!shouldOptimizeVideoUploadImage(file, folder)) return file;
+
+  let decoded = null;
+  try {
+    decoded = await decodeImageForUpload(file);
+    const width = Number(decoded.width) || 0;
+    const height = Number(decoded.height) || 0;
+    if (!width || !height) return file;
+
+    const longestEdge = Math.max(width, height);
+    const needsResize = longestEdge > VIDEO_IMAGE_UPLOAD_MAX_EDGE_PX;
+    const isLargeFile = Number(file.size) > VIDEO_IMAGE_UPLOAD_LARGE_BYTES;
+    if (!needsResize && !isLargeFile) return file;
+
+    const scale = Math.min(1, VIDEO_IMAGE_UPLOAD_MAX_EDGE_PX / longestEdge);
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+    const canvas = createUploadCanvas(targetWidth, targetHeight);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return file;
+    ctx.clearRect(0, 0, targetWidth, targetHeight);
+    ctx.drawImage(decoded.source, 0, 0, targetWidth, targetHeight);
+
+    const hasAlpha = detectImageHasAlpha(decoded.source);
+    const attempts = hasAlpha
+      ? [
+          { type: 'image/webp', quality: 0.92 },
+          { type: 'image/webp', quality: 0.84 },
+          { type: 'image/png' },
+        ]
+      : [
+          { type: 'image/jpeg', quality: 0.9 },
+          { type: 'image/jpeg', quality: 0.82 },
+          { type: 'image/webp', quality: 0.84 },
+          { type: 'image/jpeg', quality: 0.74 },
+        ];
+
+    let bestBlob = null;
+    for (const attempt of attempts) {
+      let blob = null;
+      try {
+        blob = await canvasToBlob(canvas, attempt.type, attempt.quality);
+      } catch (_) {
+        blob = null;
+      }
+      if (!blob) continue;
+      if (!bestBlob || blob.size < bestBlob.size) bestBlob = blob;
+      if (blob.size <= VIDEO_IMAGE_UPLOAD_MAX_BYTES) {
+        bestBlob = blob;
+        break;
+      }
+    }
+
+    if (!bestBlob) return file;
+    const optimizedType = bestBlob.type || (hasAlpha ? 'image/webp' : 'image/jpeg');
+    const optimizedFile = new File(
+      [bestBlob],
+      buildOptimizedImageFilename(file.name, optimizedType),
+      { type: optimizedType, lastModified: Date.now() }
+    );
+
+    // Only replace when we materially improve upload cost or dimensions.
+    if (optimizedFile.size >= file.size * 0.97 && !needsResize) return file;
+    return optimizedFile;
+  } catch (error) {
+    console.warn('Video upload image optimization skipped:', error);
+    return file;
+  } finally {
+    if (decoded && typeof decoded.cleanup === 'function') decoded.cleanup();
+  }
+}
+
+let _falStorageClientPromise = null;
+
+async function getFalStorageClient() {
+  if (_falStorageClientPromise) return _falStorageClientPromise;
+  _falStorageClientPromise = (async () => {
+    let mod = null;
+    try {
+      mod = await import('https://esm.sh/@fal-ai/client@1.9.5?bundle');
+    } catch (_) {
+      mod = await import('https://esm.sh/@fal-ai/client@1.9.5');
+    }
+    const fal = mod && mod.fal ? mod.fal : null;
+    if (!fal || typeof fal.config !== 'function' || !fal.storage || typeof fal.storage.upload !== 'function') {
+      throw new Error('fal upload client not available');
+    }
+    fal.config({ proxyUrl: '/api/fal/proxy' });
+    return fal.storage;
+  })();
+  return _falStorageClientPromise;
+}
+
+async function uploadFileToFal(file, folder, task) {
+  if (!file) return null;
+  const preparedFile = await optimizeImageForVideoUpload(file, folder);
+  const storage = await getFalStorageClient();
+  let url = null;
+  try {
+    markTaskActivity(task);
+    url = await storage.upload(preparedFile, {
+      lifecycle: {
+        expiresIn: '1d',
+      },
+    });
+  } catch (error) {
+    if (preparedFile !== file) {
+      console.warn('Optimized video image upload failed, retrying original file:', error);
+      markTaskActivity(task);
+      url = await storage.upload(file, {
+        lifecycle: {
+          expiresIn: '1d',
+        },
+      });
+    } else {
+      throw error;
+    }
+  }
+  if (url) {
+    markTaskActivity(task);
+    registerTaskBlobUrl(task, url);
+  }
+  return url;
+}
+
+async function resolveUploadItemUrl(item, folder, task) {
+  if (!item) return null;
+  markTaskActivity(task);
+  if (typeof item === 'string' && isDirectRemoteUrl(item)) {
+    if (canPassThroughRemoteUrl(item)) return item.trim();
+    const file = await fetchUrlAsFile(item.trim(), {});
+    return uploadFileToFal(file, folder, task);
+  }
+  if (isRemoteAssetItem(item)) {
+    if (canPassThroughRemoteUrl(item.url)) return item.url || null;
+    const file = await ensureFileLikeAssetItem(item);
+    return uploadFileToFal(file, folder, task);
+  }
+  return uploadFileToFal(item, folder, task);
+}
+
+async function resolveUploadItemUrls(items, folder, task, limit = Infinity) {
+  const source = Array.isArray(items) ? items.filter(Boolean).slice(0, limit) : [];
+  const urls = [];
+  for (const item of source) {
+    const url = await resolveUploadItemUrl(item, folder, task);
+    if (url) urls.push(url);
+  }
+  return urls;
 }
 
 async function submitImageRequest(task) {
@@ -5047,16 +8580,13 @@ async function submitImageRequest(task) {
     }
   } else {
     // Image editing mode
-    const imageUrls = [];
-    for (const f of uploadedImageFiles) {
-      const u = await uploadFileToBlob(f, 'image-input');
-      if (u) imageUrls.push(u);
-    }
+    const imageUrls = await resolveUploadItemUrls(uploadedImageFiles, 'image-input', task);
     if (imageUrls.length === 0) throw new Error(window.I18N ? I18N.t('toast_upload_image') : 'Upload at least one image for Style mode');
     body.image_urls = imageUrls;
 
-    if (uploadedMaskFile) {
-      const mu = await uploadFileToBlob(uploadedMaskFile, 'mask');
+    const maskSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.maskInput)[0] || uploadedMaskFile;
+    if (maskSource) {
+      const mu = await resolveUploadItemUrl(maskSource, 'mask', task);
       if (mu) body.mask_image_url = mu;
     }
 
@@ -5117,7 +8647,7 @@ async function submitImageRequest(task) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await createResponseError(res, 'Image generation failed');
   return await res.json();
 }
 
@@ -5128,9 +8658,16 @@ async function submit3dRequest(task) {
     model_id: modelId,
   };
 
+  const front3dSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDFrontInput)[0] || uploaded3dFrontFile;
+  const back3dSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDBackInput)[0] || uploaded3dBackFile;
+  const left3dSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDLeftInput)[0] || uploaded3dLeftFile;
+  const right3dSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDRightInput)[0] || uploaded3dRightFile;
+  const meshyTextureSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDMeshyTextureImageInput)[0] || uploaded3dMeshyTextureImageFile;
+  const retextureStyleSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDRetextureStyleImageInput)[0] || uploaded3dRetextureStyleImageFile;
+
   if (modelId === 'fal-ai/hunyuan3d-v3/image-to-3d') {
-    if (!uploaded3dFrontFile) throw new Error('Front image is required for 3D generation');
-    body.input_image_url = await uploadFileToBlob(uploaded3dFrontFile, '3d-front');
+    if (!front3dSource) throw new Error('Front image is required for 3D generation');
+    body.input_image_url = await resolveUploadItemUrl(front3dSource, '3d-front', task);
     body.generate_type = qs('threeDGenerateType') ? qs('threeDGenerateType').value : 'Normal';
     body.enable_pbr = (qs('threeDEnablePbr') ? qs('threeDEnablePbr').value : 'false') === 'true';
     body.polygon_type = qs('threeDPolygonType') ? qs('threeDPolygonType').value : 'triangle';
@@ -5138,9 +8675,9 @@ async function submit3dRequest(task) {
     const faceCount = qs('threeDFaceCount') ? String(qs('threeDFaceCount').value || '').trim() : '';
     if (faceCount) body.face_count = Number(faceCount);
 
-    if (uploaded3dBackFile) body.back_image_url = await uploadFileToBlob(uploaded3dBackFile, '3d-back');
-    if (uploaded3dLeftFile) body.left_image_url = await uploadFileToBlob(uploaded3dLeftFile, '3d-left');
-    if (uploaded3dRightFile) body.right_image_url = await uploadFileToBlob(uploaded3dRightFile, '3d-right');
+    if (back3dSource) body.back_image_url = await resolveUploadItemUrl(back3dSource, '3d-back', task);
+    if (left3dSource) body.left_image_url = await resolveUploadItemUrl(left3dSource, '3d-left', task);
+    if (right3dSource) body.right_image_url = await resolveUploadItemUrl(right3dSource, '3d-right', task);
   }
 
   if (modelId === 'fal-ai/hunyuan3d-v3/text-to-3d') {
@@ -5156,8 +8693,8 @@ async function submit3dRequest(task) {
   }
 
   if (modelId === 'fal-ai/meshy/v6-preview/image-to-3d') {
-    if (!uploaded3dFrontFile) throw new Error('Front image is required for 3D generation');
-    body.image_url = await uploadFileToBlob(uploaded3dFrontFile, '3d-front');
+    if (!front3dSource) throw new Error('Front image is required for 3D generation');
+    body.image_url = await resolveUploadItemUrl(front3dSource, '3d-front', task);
     body.topology = qs('threeDMeshyTopology') ? qs('threeDMeshyTopology').value : 'triangle';
     body.symmetry_mode = qs('threeDMeshySymmetryMode') ? qs('threeDMeshySymmetryMode').value : 'auto';
     body.should_remesh = (qs('threeDMeshyShouldRemesh') ? qs('threeDMeshyShouldRemesh').value : 'true') === 'true';
@@ -5174,7 +8711,7 @@ async function submit3dRequest(task) {
 
     const tUrl = qs('threeDMeshyTextureImageUrl') ? String(qs('threeDMeshyTextureImageUrl').value || '').trim() : '';
     if (tUrl) body.texture_image_url = tUrl;
-    if (uploaded3dMeshyTextureImageFile) body.texture_image_url = await uploadFileToBlob(uploaded3dMeshyTextureImageFile, '3d-texture');
+    if (meshyTextureSource) body.texture_image_url = await resolveUploadItemUrl(meshyTextureSource, '3d-texture', task);
   }
 
   if (modelId === 'fal-ai/meshy/v6-preview/text-to-3d') {
@@ -5202,19 +8739,19 @@ async function submit3dRequest(task) {
 
     const tUrl = qs('threeDMeshyTextureImageUrl') ? String(qs('threeDMeshyTextureImageUrl').value || '').trim() : '';
     if (tUrl) body.texture_image_url = tUrl;
-    if (uploaded3dMeshyTextureImageFile) body.texture_image_url = await uploadFileToBlob(uploaded3dMeshyTextureImageFile, '3d-texture');
+    if (meshyTextureSource) body.texture_image_url = await resolveUploadItemUrl(meshyTextureSource, '3d-texture', task);
   }
 
   if (modelId === 'fal-ai/hunyuan-3d/v3.1/rapid/image-to-3d') {
-    if (!uploaded3dFrontFile) throw new Error('Front image is required for Rapid Image to 3D');
-    body.input_image_url = await uploadFileToBlob(uploaded3dFrontFile, '3d-rapid-front');
+    if (!front3dSource) throw new Error('Front image is required for Rapid Image to 3D');
+    body.input_image_url = await resolveUploadItemUrl(front3dSource, '3d-rapid-front', task);
     body.enable_pbr = (qs('threeDRapidEnablePbr') ? qs('threeDRapidEnablePbr').value : 'false') === 'true';
     body.enable_geometry = (qs('threeDRapidEnableGeometry') ? qs('threeDRapidEnableGeometry').value : 'false') === 'true';
   }
 
   if (modelId === 'fal-ai/hunyuan-3d/v3.1/smart-topology') {
     if (!uploaded3dTopologyFile) throw new Error('3D file (GLB/OBJ) is required for Smart Topology');
-    body.input_file_url = await uploadFileToBlob(uploaded3dTopologyFile, '3d-topology');
+    body.input_file_url = await uploadFileToFal(uploaded3dTopologyFile, '3d-topology', task);
     // Auto-detect file type from extension, fallback to dropdown
     const topoFileName = (uploaded3dTopologyFile.name || '').toLowerCase();
     const autoType = topoFileName.endsWith('.obj') ? 'obj' : (topoFileName.endsWith('.glb') ? 'glb' : null);
@@ -5225,13 +8762,13 @@ async function submit3dRequest(task) {
 
   if (modelId === 'fal-ai/meshy/v5/retexture') {
     if (!uploaded3dRetextureModelFile) throw new Error('3D model file is required for Retexture');
-    body.model_url = await uploadFileToBlob(uploaded3dRetextureModelFile, '3d-retexture-model');
+    body.model_url = await uploadFileToFal(uploaded3dRetextureModelFile, '3d-retexture-model', task);
 
     const stylePrompt = qs('threeDRetextureStylePrompt') ? String(qs('threeDRetextureStylePrompt').value || '').trim() : '';
     if (stylePrompt) body.text_style_prompt = stylePrompt;
 
-    if (uploaded3dRetextureStyleImageFile) {
-      body.image_style_url = await uploadFileToBlob(uploaded3dRetextureStyleImageFile, '3d-retexture-style');
+    if (retextureStyleSource) {
+      body.image_style_url = await resolveUploadItemUrl(retextureStyleSource, '3d-retexture-style', task);
     }
 
     if (!stylePrompt && !body.image_style_url) {
@@ -5248,13 +8785,18 @@ async function submit3dRequest(task) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await createResponseError(res, '3D generation failed');
   return await res.json();
 }
 
 async function submitVideoRequest(task) {
   ensureVideoControls();
   const modelId = qs('videoModel') ? qs('videoModel').value : '';
+  const modelMeta = modelId ? (VIDEO_MODEL_MAP.get(modelId) || null) : null;
+  if (modelMeta && isKling3VideoKind(modelMeta.kind)) {
+    syncKling3StateFromVideoModelId(modelId, { skipSave: true });
+    return submitKling3Request({ ...task, model_id: modelId });
+  }
   const prompt = task.prompt;
 
   const body = { model_id: modelId, prompt };
@@ -5271,7 +8813,6 @@ async function submitVideoRequest(task) {
   if (top.duration_hailuo != null) mergedOptions.duration_hailuo = top.duration_hailuo;
   if (Object.keys(mergedOptions).length > 0) body.options = mergedOptions;
 
-  const modelMeta = getSelectedVideoModel();
   if (modelMeta && modelMeta.kind === 'video-id-to-video') {
     const vid = qs('videoIdInput') ? String(qs('videoIdInput').value || '').trim() : '';
     if (vid) body.video_id = vid;
@@ -5280,33 +8821,48 @@ async function submitVideoRequest(task) {
   const videoUrl = qs('videoUrlInput') ? String(qs('videoUrlInput').value || '').trim() : '';
   if (videoUrl) body.video_url = videoUrl;
 
-  if (uploadedVideoFile) {
-    const vu = await uploadFileToBlob(uploadedVideoFile, 'video');
+  const videoSource = getManagedUploadPrimarySource(MANAGED_UPLOADS.videoInput, uploadedVideoFile);
+  const videoImageSource = getManagedUploadPrimarySource(MANAGED_UPLOADS.videoImageInput, uploadedVideoImageFile);
+
+  const endImageSource = getManagedUploadPrimarySource(MANAGED_UPLOADS.videoEndImageInput, uploadedEndImageFile);
+
+  const referenceSources = [
+    ...getManagedUploadRemoteItems(MANAGED_UPLOADS.referenceImagesInput),
+    ...(Array.isArray(uploadedReferenceImages) ? uploadedReferenceImages : []),
+  ];
+
+  const audioSource = getManagedUploadPrimarySource(MANAGED_UPLOADS.audioInput, uploadedAudioFile);
+
+  if (videoSource) {
+    const vu = await resolveUploadItemUrl(videoSource, 'video', task);
     if (vu) body.video_url = vu;
   }
 
-  if (uploadedVideoImageFile) {
-    const iu = await uploadFileToBlob(uploadedVideoImageFile, 'video-image');
+  if (videoImageSource) {
+    const iu = await resolveUploadItemUrl(videoImageSource, 'video-image', task);
     if (iu) body.image_url = iu;
   }
+  if (
+    modelMeta
+    && modelMeta.requiresImage !== false
+    && ['image-to-video', 'audio-to-video', 'reference-to-video', 'motion-control'].includes(modelMeta.kind)
+    && !body.image_url
+  ) {
+    throw new Error('Failed to attach the start image for this video model. Please reselect the image and try again.');
+  }
 
-  if (uploadedEndImageFile) {
-    const eu = await uploadFileToBlob(uploadedEndImageFile, 'video-end-image');
+  if (endImageSource) {
+    const eu = await resolveUploadItemUrl(endImageSource, 'video-end-image', task);
     if (eu) body.end_image_url = eu;
   }
 
-  if (uploadedReferenceImages && uploadedReferenceImages.length > 0) {
-    const imageUrls = [];
-    for (const f of uploadedReferenceImages) {
-      const u = await uploadFileToBlob(f, 'video-reference');
-      if (u) imageUrls.push(u);
-    }
+  if (referenceSources.length > 0) {
+    const imageUrls = await resolveUploadItemUrls(referenceSources, 'video-reference', task);
     if (imageUrls.length > 0) body.image_urls = imageUrls;
   }
 
-  // Upload audio file if provided
-  if (uploadedAudioFile) {
-    const au = await uploadFileToBlob(uploadedAudioFile, 'audio');
+  if (audioSource) {
+    const au = await resolveUploadItemUrl(audioSource, 'audio', task);
     if (au) body.audio_url = au;
   }
 
@@ -5315,7 +8871,7 @@ async function submitVideoRequest(task) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await createResponseError(res, 'Video generation failed');
   return await res.json();
 }
 
@@ -5345,22 +8901,25 @@ async function pollTask(taskId) {
 
         if (!t.savedToHistory) {
           const placeholder3d = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="#000"/><text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="#fff" font-family="Arial" font-size="14">3D</text></svg>')}`;
-          const item = {
-            type: '3d',
-            url: t.thumbUrl || placeholder3d,
-            glbUrl: o.glbUrl || null,
-            modelDownloadUrl: o.modelDownloadUrl,
-            modelFormat: o.modelFormat || 'glb',
-            model_urls: t.model_urls || null,
-            prompt: t.prompt || '',
+          const item = buildTaskHistoryItem(t, '3d', t.thumbUrl || placeholder3d, {
+            suffix: '3d',
             timestamp: t.completedAt,
-            genCtx: t.genCtx || null,
-          };
+            meta: {
+              glbUrl: o.glbUrl || null,
+              modelDownloadUrl: o.modelDownloadUrl,
+              modelFormat: o.modelFormat || 'glb',
+              model_urls: t.model_urls || null,
+            },
+          });
+          item.glbUrl = o.glbUrl || null;
+          item.modelDownloadUrl = o.modelDownloadUrl;
+          item.modelFormat = o.modelFormat || 'glb';
+          item.model_urls = t.model_urls || null;
           t.savedToHistory = true;
           addToHistory(item);
           displayResult(item);
           // Generate small thumbnail for the 3D item
-          if (item.url && !item.url.startsWith('data:')) {
+          if (item.url && !item.url.startsWith('data:') && !isPrimaryCoarsePointer()) {
             generateImageThumbnail(item.url).then((thumb) => {
               if (thumb) {
                 item.thumbnailUrl = thumb;
@@ -5384,42 +8943,25 @@ async function pollTask(taskId) {
           // Build gallery items for all outputs — batch insert (single save + single UI update)
           const items = [];
           for (let i = 0; i < urls.length; i++) {
-            const item = {
-              type: isVideoMode ? 'video' : 'image',
-              url: urls[i],
-              prompt: t.prompt || '',
+            const item = buildTaskHistoryItem(t, isVideoMode ? 'video' : 'image', urls[i], {
+              suffix: (isVideoMode ? 'video' : 'image') + '_' + i,
               timestamp: t.completedAt + i,
-              genCtx: t.genCtx || null,
-            };
-            // Generate small thumbnail — avoids loading full-res images as 44px thumbs
-            const thumbGenerator = isVideoMode ? generateVideoThumbnail : generateImageThumbnail;
-            thumbGenerator(urls[i]).then((thumb) => {
-              if (thumb) {
-                item.thumbnailUrl = thumb;
-                _pendingHistorySave = true;
-                debouncedSaveHistory();
-                // Patch thumbnail in-place if the DOM element exists
-                const list = qs('historyList');
-                if (list) {
-                  const el = list.querySelector(`.history-item[data-index="${history.indexOf(item)}"]`);
-                  if (el) {
-                    const img = el.querySelector('.history-thumb');
-                    if (img) img.src = thumb;
-                  }
-                }
-              }
+              outputIndex: i,
             });
             addToHistorySilent(item);
             items.push(item);
+            if (isVideoMode) queueHistoryThumbnailForItem(item, i);
           }
           // Single save + single UI update for the whole batch
           saveHistory();
           scheduleHistoryUIUpdate();
+          queueAccountHistoryPersist(items);
           // Set gallery items for navigation
           setGalleryItems(items);
         }
       }
 
+      await cleanupTaskUploads(t);
       saveTasks();
       renderTasks();
       showToast(window.I18N ? I18N.t('toast_complete') : 'Masterpiece ready!', 'info');
@@ -5429,10 +8971,11 @@ async function pollTask(taskId) {
     if (data.status === 'FAILED') {
       t.status = 'FAILED';
       t.failedAt = Date.now();
-      t.error = data.error || 'Generation failed';
+      t.error = normalizeErrorMessageFromPayload(data, 'Generation failed');
+      await cleanupTaskUploads(t);
       saveTasks();
       renderTasks();
-      showToast(t.error, 'error');
+      showToast(formatErrorForDisplay(t.error), 'error');
       return;
     }
 
@@ -5445,10 +8988,11 @@ async function pollTask(taskId) {
       if (t.retryCount > MAX_POLL_RETRIES) {
         t.status = 'FAILED';
         t.failedAt = Date.now();
-        t.error = window.I18N ? I18N.t('err_connection_lost') : 'Connection lost after multiple retries. Please try again.';
+        t.error = 'Connection lost after multiple retries. Please try again.';
+        await cleanupTaskUploads(t);
         saveTasks();
         renderTasks();
-        showToast(t.error, 'error');
+        showToast(formatErrorForDisplay(t.error), 'error');
         return;
       }
       const delay = computeRetryDelayMs(t.retryCount);
@@ -5461,10 +9005,11 @@ async function pollTask(taskId) {
 
     t.status = 'FAILED';
     t.failedAt = Date.now();
-    t.error = e && e.message ? e.message : String(e);
+    t.error = getErrorMessage(e, 'Generation failed');
+    await cleanupTaskUploads(t);
     saveTasks();
     renderTasks();
-    showToast(t.error, 'error');
+    showToast(formatErrorForDisplay(t.error), 'error');
   }
 }
 
@@ -5474,6 +9019,7 @@ async function startTask(taskId) {
   t.status = 'SUBMITTING';
   t.error = null;
   t.startedAt = Date.now();
+  t.lastActivityAt = t.startedAt;
   saveTasks();
   renderTasks();
 
@@ -5488,6 +9034,7 @@ async function startTask(taskId) {
     t.status = 'RUNNING';
     t.status_url = res.status_url;
     t.response_url = res.response_url || null;
+    markTaskActivity(t);
     saveTasks();
     renderTasks();
 
@@ -5495,16 +9042,17 @@ async function startTask(taskId) {
   } catch (e) {
     t.status = 'FAILED';
     t.failedAt = Date.now();
-    t.error = e && e.message ? e.message : String(e);
+    t.error = getErrorMessage(e, 'Generation failed');
+    await cleanupTaskUploads(t);
     saveTasks();
     renderTasks();
-    showToast(t.error, 'error');
+    showToast(formatErrorForDisplay(t.error), 'error');
   }
 }
 
 function captureGenerationContext() {
   const ctx = {
-    mode: currentMode,
+    mode: currentMode === 'kling3' ? 'video' : currentMode,
     videoTab: currentVideoTab,
     kling3Family: currentKling3Family,
     kling3Tab: currentKling3Tab,
@@ -5520,6 +9068,8 @@ function captureGenerationContext() {
     const el = qs(id);
     if (el) ctx.inputs[id] = el.value;
   }
+  const klingModelId = getSelectedKling3ModelId();
+  if (klingModelId) ctx.selects.kling3Model = klingModelId;
   return ctx;
 }
 
@@ -5538,18 +9088,44 @@ async function handleGenerate() {
     const _rawPrompt = qs('promptInput') ? substituteImageRefs(qs('promptInput').value.trim()) : '';
     prompt = _rawPrompt ? `/${_rawPrompt}` : '';
   }
-  if (currentMode === 'video' && !prompt) {
-    const vm = getSelectedVideoModel();
-    if (!(vm && vm.requiresPrompt === false)) {
+  const currentVideoModelMeta = currentMode === 'video' ? getSelectedVideoModel() : null;
+  const currentVideoUsesKling3 = !!(currentVideoModelMeta && isKling3VideoKind(currentVideoModelMeta.kind));
+  if (currentMode === 'video' && !currentVideoUsesKling3 && !prompt) {
+    if (!(currentVideoModelMeta && currentVideoModelMeta.requiresPrompt === false)) {
       showToast(window.I18N ? I18N.t('toast_enter_prompt') : 'Please enter a prompt', 'error');
       return;
     }
   }
-
+  if (currentMode === 'video' && currentVideoModelMeta && currentVideoModelMeta.kind === 'audio-to-video') {
+    const manualAudioUrlInput = document.querySelector('#videoOptionsDynamic [data-opt-key="audio_url"]');
+    const hasAudioUrl = !!(manualAudioUrlInput && String(manualAudioUrlInput.value || '').trim());
+    const hasAudioSource = !!(getManagedUploadPrimarySource(MANAGED_UPLOADS.audioInput, uploadedAudioFile) || hasAudioUrl);
+    const hasGuideImage = !!getManagedUploadPrimarySource(MANAGED_UPLOADS.videoImageInput, uploadedVideoImageFile);
+    if (!hasAudioSource) {
+      showToast(window.I18N ? I18N.t('select_audio') : 'Select audio', 'error');
+      return;
+    }
+    if (!prompt && !hasGuideImage) {
+      showToast(window.I18N ? I18N.t('toast_enter_prompt') : 'Please enter a prompt', 'error');
+      return;
+    }
+  }
+  if (currentMode === 'video' && currentVideoModelMeta && !currentVideoUsesKling3) {
+    const kind = currentVideoModelMeta.kind;
+    const needsStartImage =
+      currentVideoModelMeta.requiresImage !== false
+      && (kind === 'image-to-video' || kind === 'audio-to-video' || kind === 'reference-to-video' || kind === 'motion-control');
+    if (needsStartImage && !getManagedUploadPrimarySource(MANAGED_UPLOADS.videoImageInput, uploadedVideoImageFile)) {
+      showToast(window.I18N ? I18N.t('select_image') : 'Select image', 'error');
+      return;
+    }
+  }
   // Kling 3 mode - check for prompt or multi-prompt
-  if (currentMode === 'kling3') {
-    const useMultiPrompt = qs('kling3UseMultiPrompt') && qs('kling3UseMultiPrompt').checked;
-    if (!useMultiPrompt && !prompt) {
+  if (currentMode === 'kling3' || currentVideoUsesKling3) {
+    const selectedModelId = getSelectedKling3ModelId(currentVideoModelMeta ? currentVideoModelMeta.id : '');
+    const isMotion = isKling3MotionModelId(selectedModelId) || currentKling3Tab === 'v3-motion-control';
+    const useMultiPrompt = !isMotion && qs('kling3UseMultiPrompt') && qs('kling3UseMultiPrompt').checked;
+    if (!isMotion && !useMultiPrompt && !prompt) {
       showToast(window.I18N ? I18N.t('toast_enter_prompt') : 'Please enter a prompt', 'error');
       return;
     }
@@ -5557,16 +9133,16 @@ async function handleGenerate() {
       showToast(window.I18N ? I18N.t('toast_add_shot') : 'Please add at least one shot prompt', 'error');
       return;
     }
-    // Check for required images based on tab
+    // Check for required media based on tab/model
     const tab = currentKling3Tab;
     const isI2V = tab === 'v3-image-to-video' || tab === 'o3-image-to-video';
     const isRef = tab === 'o3-reference-to-video';
     const isV2V = tab === 'o3-video-to-video';
-    if ((isI2V || isRef) && !uploadedKling3StartImage) {
+    if ((isI2V || isRef || isMotion) && !(getManagedUploadRemoteItems(MANAGED_UPLOADS.kling3StartImageInput)[0] || uploadedKling3StartImage)) {
       showToast(window.I18N ? I18N.t('toast_upload_start') : 'Please upload a start image', 'error');
       return;
     }
-    if (isV2V && !uploadedKling3Video && !qs('kling3VideoUrlInput')?.value.trim()) {
+    if ((isV2V || isMotion) && !(getManagedUploadRemoteItems(MANAGED_UPLOADS.kling3VideoInput)[0] || uploadedKling3Video) && !qs('kling3VideoUrlInput')?.value.trim()) {
       showToast(window.I18N ? I18N.t('toast_upload_video') : 'Please upload a video or enter a video URL', 'error');
       return;
     }
@@ -5583,7 +9159,7 @@ async function handleGenerate() {
       showToast(window.I18N ? I18N.t('toast_enter_prompt') : 'Please enter a prompt', 'error');
       return;
     }
-    if (meta && meta.kind === 'image-to-3d' && !uploaded3dFrontFile) {
+    if (meta && meta.kind === 'image-to-3d' && !(getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDFrontInput)[0] || uploaded3dFrontFile)) {
       showToast(window.I18N ? I18N.t('toast_upload_front') : 'Please upload a front image', 'error');
       return;
     }
@@ -5597,7 +9173,7 @@ async function handleGenerate() {
     }
     if (meta && meta.kind === 'retexture') {
       const sp = qs('threeDRetextureStylePrompt') ? qs('threeDRetextureStylePrompt').value.trim() : '';
-      if (!sp && !uploaded3dRetextureStyleImageFile) {
+      if (!sp && !(getManagedUploadRemoteItems(MANAGED_UPLOADS.threeDRetextureStyleImageInput)[0] || uploaded3dRetextureStyleImageFile)) {
         showToast(window.I18N ? I18N.t('toast_style_or_image') : 'Please provide a style prompt or style image', 'error');
         return;
       }
@@ -5607,9 +9183,12 @@ async function handleGenerate() {
   const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   let model_id;
-  if (currentMode === 'tools') model_id = qs('toolsModel') ? qs('toolsModel').value : 'nano-banana-2/edit';
-  else if (currentMode === 'text') model_id = qs('imageModelText') ? qs('imageModelText').value : 'nano-banana-pro';
-  else if (currentMode === 'image') model_id = qs('imageModelEdit') ? qs('imageModelEdit').value : 'nano-banana-pro/edit';
+  if (currentMode === 'tools') model_id = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
+  else if (currentMode === 'text') model_id = qs('imageModelText') ? qs('imageModelText').value : DEFAULT_IMAGE_TEXT_MODEL;
+  else if (currentMode === 'image') model_id = qs('imageModelEdit') ? qs('imageModelEdit').value : DEFAULT_IMAGE_EDIT_MODEL;
+  else if (currentMode === 'video') model_id = qs('videoModel') ? qs('videoModel').value : '';
+  else if (currentMode === 'kling3') model_id = getSelectedKling3ModelId();
+  else if (currentMode === '3d') model_id = qs('threeDModel') ? qs('threeDModel').value : DEFAULT_3D_MODEL;
 
   const task = {
     id,
@@ -5639,22 +9218,30 @@ function initModels() {
   const textSel = qs('imageModelText');
   if (textSel) {
     setSelectOptions(textSel, IMAGE_MODELS_TEXT);
-    if (!textSel.value) textSel.value = 'nano-banana-pro';
+    if (!textSel.value) textSel.value = DEFAULT_IMAGE_TEXT_MODEL;
   }
 
   const editSel = qs('imageModelEdit');
   if (editSel) {
     setSelectOptions(editSel, IMAGE_MODELS_EDIT);
-    if (!editSel.value) editSel.value = 'nano-banana-pro/edit';
+    if (!editSel.value) editSel.value = DEFAULT_IMAGE_EDIT_MODEL;
+  }
+
+  const toolsSel = qs('toolsModel');
+  if (toolsSel) {
+    setSelectOptions(toolsSel, TOOLS_MODELS);
+    if (!toolsSel.value) toolsSel.value = DEFAULT_TOOLS_MODEL;
   }
 
   const threeDSel = qs('threeDModel');
   if (threeDSel) {
     setSelectOptions(threeDSel, THREE_D_MODELS);
-    if (!threeDSel.value) threeDSel.value = 'fal-ai/hunyuan3d-v3/image-to-3d';
+    if (!threeDSel.value) threeDSel.value = DEFAULT_3D_MODEL;
   }
-}
 
+  if (_toolsInitialized) wizUpdateToolsSettings();
+  refreshModelNews();
+}
 function initInputs() {
   const imageInput = qs('imageInput');
   if (imageInput) {
@@ -5676,77 +9263,9 @@ function initInputs() {
     });
   }
 
-  const maskInput = qs('maskInput');
-  if (maskInput) {
-    maskInput.addEventListener('change', (e) => {
-      uploadedMaskFile = (e.target.files || [])[0] || null;
-      const label = qs('maskUploadLabel');
-      if (label) label.textContent = uploadedMaskFile ? uploadedMaskFile.name : 'Click to upload mask (optional)';
-      e.target.value = '';
-    });
-  }
-
-  const f = qs('threeDFrontInput');
-  if (f) f.addEventListener('change', (e) => {
-    uploaded3dFrontFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDFrontLabel');
-    if (label) label.textContent = uploaded3dFrontFile ? uploaded3dFrontFile.name : 'Click to upload front view';
-    e.target.value = '';
+  ['maskInput', 'threeDFrontInput', 'threeDBackInput', 'threeDLeftInput', 'threeDRightInput', 'threeDMeshyTextureImageInput', 'threeDTopologyFileInput', 'threeDRetextureModelInput', 'threeDRetextureStyleImageInput'].forEach((inputId) => {
+    bindManagedUploadById(inputId);
   });
-  const b = qs('threeDBackInput');
-  if (b) b.addEventListener('change', (e) => {
-    uploaded3dBackFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDBackLabel');
-    if (label) label.textContent = uploaded3dBackFile ? uploaded3dBackFile.name : 'Click to upload back view';
-    e.target.value = '';
-  });
-  const l = qs('threeDLeftInput');
-  if (l) l.addEventListener('change', (e) => {
-    uploaded3dLeftFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDLeftLabel');
-    if (label) label.textContent = uploaded3dLeftFile ? uploaded3dLeftFile.name : 'Click to upload left view';
-    e.target.value = '';
-  });
-  const r = qs('threeDRightInput');
-  if (r) r.addEventListener('change', (e) => {
-    uploaded3dRightFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDRightLabel');
-    if (label) label.textContent = uploaded3dRightFile ? uploaded3dRightFile.name : 'Click to upload right view';
-    e.target.value = '';
-  });
-
-  const tex = qs('threeDMeshyTextureImageInput');
-  if (tex) tex.addEventListener('change', (e) => {
-    uploaded3dMeshyTextureImageFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDMeshyTextureImageLabel');
-    if (label) label.textContent = uploaded3dMeshyTextureImageFile ? uploaded3dMeshyTextureImageFile.name : 'Click to upload texture guide';
-    e.target.value = '';
-  });
-
-  const topoInput = qs('threeDTopologyFileInput');
-  if (topoInput) topoInput.addEventListener('change', (e) => {
-    uploaded3dTopologyFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDTopologyFileLabel');
-    if (label) label.textContent = uploaded3dTopologyFile ? uploaded3dTopologyFile.name : 'Upload GLB or OBJ';
-    e.target.value = '';
-  });
-
-  const retexModelInput = qs('threeDRetextureModelInput');
-  if (retexModelInput) retexModelInput.addEventListener('change', (e) => {
-    uploaded3dRetextureModelFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDRetextureModelLabel');
-    if (label) label.textContent = uploaded3dRetextureModelFile ? uploaded3dRetextureModelFile.name : 'Upload 3D model';
-    e.target.value = '';
-  });
-
-  const retexStyleInput = qs('threeDRetextureStyleImageInput');
-  if (retexStyleInput) retexStyleInput.addEventListener('change', (e) => {
-    uploaded3dRetextureStyleImageFile = (e.target.files || [])[0] || null;
-    const label = qs('threeDRetextureStyleImageLabel');
-    if (label) label.textContent = uploaded3dRetextureStyleImageFile ? uploaded3dRetextureStyleImageFile.name : 'Upload style';
-    e.target.value = '';
-  });
-
   const m = qs('threeDModel');
   if (m) m.addEventListener('change', update3dUiVisibility);
 
@@ -5798,8 +9317,23 @@ function initTasks() {
     if (t.status === 'QUEUED' || t.status === 'SUBMITTING') {
       t.status = 'FAILED';
       t.failedAt = Date.now();
-      t.error = window.I18N ? I18N.t('err_interrupted') : 'Interrupted - please try again';
+      t.error = 'Interrupted - please try again';
       changed = true;
+    }
+  }
+
+  // Finalize any previously uploaded transient task assets for tasks already in terminal states.
+  for (const t of tasks) {
+    if (!t) continue;
+    if ((t.status === 'COMPLETED' || t.status === 'FAILED') && !t.blobCleanupDone) {
+      cleanupTaskUploads(t)
+        .then(() => {
+          saveTasks();
+          renderTasks();
+        })
+        .catch(() => {
+          saveTasks();
+        });
     }
   }
 
@@ -5810,30 +9344,29 @@ function initTasks() {
       if (t.mode === '3d' && t.mediaUrl) {
         const placeholder3d = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="#000"/><text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="#fff" font-family="Arial" font-size="14">3D</text></svg>')}`;
         const fmt = t.modelFormat || 'glb';
-        const item = {
-          type: '3d',
-          url: t.thumbUrl || placeholder3d,
-          glbUrl: fmt === 'glb' ? t.mediaUrl : null,
-          modelDownloadUrl: t.mediaUrl,
-          modelFormat: fmt,
-          model_urls: t.model_urls || null,
-          prompt: t.prompt || '',
+        const item = buildTaskHistoryItem(t, '3d', t.thumbUrl || placeholder3d, {
+          suffix: '3d',
           timestamp: t.completedAt || Date.now(),
-          genCtx: t.genCtx || null,
-        };
+          meta: {
+            glbUrl: fmt === 'glb' ? t.mediaUrl : null,
+            modelDownloadUrl: t.mediaUrl,
+            modelFormat: fmt,
+            model_urls: t.model_urls || null,
+          },
+        });
+        item.glbUrl = fmt === 'glb' ? t.mediaUrl : null;
+        item.modelDownloadUrl = t.mediaUrl;
+        item.modelFormat = fmt;
+        item.model_urls = t.model_urls || null;
         t.savedToHistory = true;
         addToHistory(item);
         changed = true;
       }
-
       if (t.mode !== '3d' && t.mediaUrl) {
-        const item = {
-          type: t.mode === 'video' ? 'video' : 'image',
-          url: t.mediaUrl,
-          prompt: t.prompt || '',
+        const item = buildTaskHistoryItem(t, t.mode === 'video' ? 'video' : 'image', t.mediaUrl, {
+          suffix: t.mode === 'video' ? 'video' : 'image',
           timestamp: t.completedAt || Date.now(),
-          genCtx: t.genCtx || null,
-        };
+        });
         t.savedToHistory = true;
         addToHistory(item);
         changed = true;
@@ -5851,7 +9384,7 @@ function initTasks() {
     if (t.status === 'RUNNING' && age > MAX_TASK_AGE_MS) {
       t.status = 'FAILED';
       t.failedAt = Date.now();
-      t.error = window.I18N ? I18N.t('err_task_expired') : 'Task expired after being active too long. Please try again.';
+      t.error = 'Task expired after being active too long. Please try again.';
       changed = true;
       continue;
     }
@@ -5886,28 +9419,12 @@ document.addEventListener('click', (e) => {
 });
 
 // Generate thumbnails for history items that don't have them (video + image)
-async function generateMissingThumbnails() {
-  let changed = false;
-  // Process in small batches to avoid blocking the main thread
-  for (const item of history) {
-    if (!item.thumbnailUrl && item.url) {
-      let thumb = null;
-      if (item.type === 'video') {
-        thumb = await generateVideoThumbnail(item.url);
-      } else if (item.type === 'image' || (!item.type && item.url)) {
-        thumb = await generateImageThumbnail(item.url);
-      }
-      if (thumb) {
-        item.thumbnailUrl = thumb;
-        changed = true;
-      }
-    }
-  }
-  if (changed) {
-    saveHistory();
-    // Only update UI if drawer has been rendered; otherwise next open will pick up changes
-    if (_historyRendered) updateHistoryUI();
-  }
+async function generateMissingThumbnails(items = null) {
+  if (shouldSkipClientHistoryThumbnailWork()) return;
+  const source = Array.isArray(items) && items.length
+    ? items
+    : history.slice(0, Math.min(history.length, 24)).map((item, index) => ({ item, index }));
+  queueVisibleHistoryThumbnails(source);
 }
 
 // Prevent model-viewer from opening new windows on touch/click
@@ -5958,6 +9475,10 @@ function _wizIdbOpen() {
 async function wizIdbSaveImages() {
   try {
     const toB64 = (f) => new Promise((res) => {
+      if (isRemoteAssetItem(f)) {
+        res({ __remoteAsset: true, url: f.url, name: f.name, type: f.type, assetType: f.assetType || 'image' });
+        return;
+      }
       const r = new FileReader(); r.onload = () => res({ name: f.name, type: f.type, data: r.result }); r.readAsDataURL(f);
     });
     // Convert ALL files BEFORE opening the transaction to avoid TransactionInactiveError
@@ -5991,6 +9512,9 @@ async function wizIdbRestoreImages() {
     });
     db.close();
     const b64ToFile = (item) => {
+      if (item && item.__remoteAsset && item.url) {
+        return createRemoteAssetItem(item);
+      }
       if (!item || !item.data) return null;
       const arr = item.data.split(','); const mime = arr[0].match(/:(.*?);/)[1];
       const bstr = atob(arr[1]); const u8 = new Uint8Array(bstr.length);
@@ -6026,6 +9550,7 @@ const PERSISTED_SELECTS = [
   'videoModel',
   'kling3Duration', 'kling3AspectRatio', 'kling3ShotType', 'kling3CfgScale',
   'kling3GenerateAudio', 'kling3KeepAudio',
+  'kling3MotionOrientation', 'kling3KeepOriginalSound',
   'aspectRatioBase',
   'toolsModel', 'toolsResolution', 'toolsAspectRatio', 'toolsWebSearch', 'toolsGoogleSearch',
 ];
@@ -6040,6 +9565,10 @@ const PERSISTED_INPUTS = [
   'toolsTitleInput', 'toolsFontInput', 'toolsWishesInput', 'toolsSeed',
 ];
 
+const PERSISTED_CHECKBOXES = [
+  'toolsInspoMatchBg',
+];
+
 function saveAppState() {
   try {
     const state = {
@@ -6049,6 +9578,7 @@ function saveAppState() {
       kling3Tab: currentKling3Tab,
       selects: {},
       inputs: {},
+      checkboxes: {},
     };
     for (const id of PERSISTED_SELECTS) {
       const el = qs(id);
@@ -6058,6 +9588,12 @@ function saveAppState() {
       const el = qs(id);
       if (el) state.inputs[id] = el.value;
     }
+    for (const id of PERSISTED_CHECKBOXES) {
+      const el = qs(id);
+      if (el) state.checkboxes[id] = !!el.checked;
+    }
+    const klingModelId = getSelectedKling3ModelId();
+    if (klingModelId) state.selects.kling3Model = klingModelId;
     // Wizard-specific state
     if (typeof _wizStep === 'number') state.wizStep = _wizStep;
     // Characteristics
@@ -6102,10 +9638,37 @@ function restoreAppState() {
       }
     }
 
+    // Restore checkbox values
+    if (state.checkboxes) {
+      for (const [id, val] of Object.entries(state.checkboxes)) {
+        const el = qs(id);
+        if (el) el.checked = !!val;
+      }
+    }
+
     // Restore mode and tabs
     if (state.videoTab) currentVideoTab = state.videoTab;
     if (state.kling3Family) currentKling3Family = state.kling3Family;
     if (state.kling3Tab) currentKling3Tab = state.kling3Tab;
+    if (!state.videoTab && state.kling3Tab) {
+      const mappedVideoTab = getVideoTabForKling3Tab(state.kling3Tab);
+      if (mappedVideoTab) currentVideoTab = mappedVideoTab;
+    }
+    const restoredKlingModelId = state.selects
+      ? String(state.selects.videoModel || state.selects.kling3Model || '')
+      : '';
+    const restoredKlingTab = getKling3TabForModelId(restoredKlingModelId);
+    if (restoredKlingTab) {
+      currentKling3Tab = restoredKlingTab;
+      currentKling3Family = getKling3FamilyForTab(restoredKlingTab);
+      kling3SelectedModelByTab[restoredKlingTab] = restoredKlingModelId;
+      if (!state.videoTab) {
+        const mappedVideoTab = getVideoTabForKling3Tab(restoredKlingTab);
+        if (mappedVideoTab) currentVideoTab = mappedVideoTab;
+      }
+    } else if (state.selects && state.selects.kling3Model && currentKling3Tab) {
+      kling3SelectedModelByTab[currentKling3Tab] = state.selects.kling3Model;
+    }
 
     // Stash wizard state for initToolsControls to pick up
     window._wizRestoredState = {
@@ -6114,7 +9677,9 @@ function restoreAppState() {
       selectedPresets: Array.isArray(state.wizSelectedPresets) ? state.wizSelectedPresets : null,
     };
 
-    return state.mode || false;
+    requestAnimationFrame(autoResizePromptInput);
+
+    return state.mode === 'kling3' ? 'video' : (state.mode || false);
   } catch (e) {
     return false;
   }
@@ -6129,16 +9694,364 @@ function hookPersistence() {
     const el = qs(id);
     if (el) el.addEventListener('input', saveAppState);
   }
+  for (const id of PERSISTED_CHECKBOXES) {
+    const el = qs(id);
+    if (el) el.addEventListener('change', saveAppState);
+  }
 }
 
+function refreshLocalizedDynamicUi() {
+  refreshAllManagedUploads();
+  localizeVideoOptionFields(qs('videoOptionsDynamic'));
+  if (typeof renderKling3Elements === 'function') renderKling3Elements();
+
+  const previewArea = qs('previewArea');
+  if (previewArea) bindAssetDragSource(previewArea, currentPreview);
+  const img = qs('resultImage');
+  if (img) bindAssetDragSource(img, currentPreview && currentPreview.type === 'image' ? currentPreview : null, { badge: false });
+  const vid = qs('resultVideo');
+  if (vid) bindAssetDragSource(vid, currentPreview && currentPreview.type === 'video' ? currentPreview : null, { badge: false });
+
+  const modalBody = qs('mediaModalBody');
+  if (modalBody) {
+    bindAssetDragSource(modalBody, currentPreview);
+    const modalMedia = modalBody.querySelector('img, video');
+    if (modalMedia) bindAssetDragSource(modalMedia, currentPreview, { badge: false });
+  }
+}
+
+function hookNewsLocaleUpdates() {
+  if (!window.I18N || !window.I18N.applyLocale || window._localeUiHooked) return;
+  window._localeUiHooked = true;
+  const originalApplyLocale = window.I18N.applyLocale.bind(window.I18N);
+  window.I18N.applyLocale = function() {
+    originalApplyLocale.call(this);
+    refreshModelNews(true);
+    renderTasks();
+    if (typeof updateHistoryUI === 'function') updateHistoryUI();
+    refreshLocalizedDynamicUi();
+  };
+}
+
+function clearPreviewDisplay() {
+  currentPreview = null;
+  galleryItems = [];
+  galleryIndex = 0;
+  const img = qs('resultImage');
+  const vid = qs('resultVideo');
+  const model = qs('resultModel');
+  const placeholder = qs('placeholder');
+  const dl = qs('downloadBtn');
+  const assetBtn = qs('useAsAssetBtn');
+  if (img) { img.style.display = 'none'; img.removeAttribute('src'); }
+  if (vid) { if (typeof vid.pause === 'function') vid.pause(); vid.style.display = 'none'; vid.removeAttribute('src'); vid.removeAttribute('poster'); }
+  if (model) { model.style.display = 'none'; model.removeAttribute('src'); }
+  if (placeholder) placeholder.style.display = 'flex';
+  if (dl) dl.style.display = 'none';
+  if (assetBtn) assetBtn.style.display = 'none';
+}
+
+function getTextPresetStoresSnapshot() {
+  return {
+    titleStore: _getStoreForKey(TITLE_PRESETS_KEY),
+    charStore: _getStoreForKey(CHAR_PRESETS_KEY),
+  };
+}
+
+function normalizePresetCreatedAt(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return new Date().toISOString();
+    if (/^\d{10,17}$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      const date = new Date(numeric);
+      return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+    }
+    const parsed = Date.parse(trimmed);
+    if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+  }
+  return new Date().toISOString();
+}
+
+function normalizeCustomPresetForState(preset) {
+  if (!preset) return null;
+  return {
+    id: preset.id,
+    name: preset.name || 'Custom Preset',
+    dataUrl: preset.dataUrl || null,
+    src: preset.src || preset.dataUrl || null,
+    storagePath: preset.storagePath || null,
+    createdAt: normalizePresetCreatedAt(preset.createdAt || preset.addedAt),
+  };
+}
+
+function getDesignPresetStateSnapshot() {
+  return {
+    hiddenBuiltins: [..._wizHiddenBuiltins],
+    nameOverrides: { ..._wizPresetNameOverrides },
+    customPresets: _wizCustomPresets.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean),
+  };
+}
+
+async function getLegacyCustomPresets() {
+  const items = await _inspoIdbLoadAll('__guest__');
+  return items.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean);
+}
+
+function getLegacyStoreForKey(key) {
+  const store = readStoredJson(key, {});
+  return store && typeof store === 'object' ? store : {};
+}
+
+async function getLegacyMigrationPayload() {
+  const historyItems = readStoredJson('nano_history', []);
+  const titleStore = getLegacyStoreForKey(TITLE_PRESETS_KEY);
+  const charStore = getLegacyStoreForKey(CHAR_PRESETS_KEY);
+  const hiddenBuiltinsRaw = readStoredJson(INSPO_HIDDEN_KEY, []);
+  const hiddenBuiltins = Array.isArray(hiddenBuiltinsRaw) ? hiddenBuiltinsRaw : [];
+  const nameOverrides = readStoredJson(INSPO_NAMES_KEY, {});
+  const customPresets = await getLegacyCustomPresets();
+  return {
+    history: Array.isArray(historyItems) ? historyItems : [],
+    titleStore,
+    charStore,
+    designPresetState: {
+      hiddenBuiltins,
+      nameOverrides: nameOverrides && typeof nameOverrides === 'object' ? nameOverrides : {},
+      customPresets,
+    },
+  };
+}
+
+async function clearLegacyMigrationData(markerUserId) {
+  ['nano_history', 'nano_tasks', TITLE_PRESETS_KEY, CHAR_PRESETS_KEY, INSPO_HIDDEN_KEY, INSPO_NAMES_KEY, INSPO_STATE_META_KEY].forEach((key) => localStorage.removeItem(key));
+  try {
+    await _inspoIdbReplaceAllForOwner('__guest__', []);
+  } catch (error) {
+    console.warn('Failed to clear guest design preset cache', error);
+  }
+  localStorage.setItem('nano_account_migration', JSON.stringify({
+    consumed: true,
+    userId: markerUserId || null,
+    consumedAt: new Date().toISOString(),
+  }));
+}
+
+function applyTextPresetStores(titleStore, charStore) {
+  withAccountSyncSuspended(() => {
+    _saveStoreForKey(TITLE_PRESETS_KEY, titleStore || {});
+    _saveStoreForKey(CHAR_PRESETS_KEY, charStore || {});
+  });
+}
+
+async function applyDesignPresetState(state) {
+  const nextState = state || {};
+  const ownerKey = getInspoPresetOwnerKey();
+  withAccountSyncSuspended(() => {
+    _wizHiddenBuiltins = new Set(Array.isArray(nextState.hiddenBuiltins) ? nextState.hiddenBuiltins : []);
+    _wizPresetNameOverrides = nextState.nameOverrides && typeof nextState.nameOverrides === 'object' ? { ...nextState.nameOverrides } : {};
+    _wizCustomPresets = (Array.isArray(nextState.customPresets) ? nextState.customPresets : []).map((preset) => ({
+      ...normalizeCustomPresetForState(preset),
+      ownerKey,
+    })).filter(Boolean);
+    inspoSaveLocalMeta({ markDirty: false });
+  });
+  try {
+    await _inspoIdbReplaceAllForOwner(ownerKey, _wizCustomPresets);
+  } catch (error) {
+    console.warn('Failed to cache scoped design presets', error);
+  }
+  wizRenderInspoPresets();
+}
+
+function mergePersistedHistoryItems(localItems, savedItems) {
+  const list = Array.isArray(localItems) ? localItems : [localItems];
+  const saved = Array.isArray(savedItems) ? savedItems : [savedItems];
+  saved.forEach((savedItem, index) => {
+    const target = list[index];
+    if (!target || !savedItem) return;
+    Object.assign(target, savedItem, { cloud: true });
+    delete target.__accountPersistQueued;
+    if (currentPreview === target) displayResult(target);
+  });
+  saveHistory();
+  scheduleHistoryUIUpdate();
+}
+
+function replaceHistoryFromAccount(items, options = {}) {
+  const persist = options.persist !== false;
+  history = dedupeHistoryItems(Array.isArray(items) ? items.slice() : []);
+  if (persist) saveHistory();
+  else persistHistoryCacheMeta(history, undefined, { persistedCount: Math.min(Array.isArray(history) ? history.length : 0, LOCAL_HISTORY_CACHE_LIMIT) });
+  scheduleHistoryUIUpdate();
+  if (_fhgState.open) renderFhgGallery();
+  generateMissingThumbnails();
+}
+
+function appendHistoryFromAccount(items, options = {}) {
+  if (!Array.isArray(items) || !items.length) return;
+  const persist = options.persist !== false;
+  const previousKeys = new Set((Array.isArray(history) ? history : []).map((item, index) => getHistoryIdentityKey(item, index)));
+  history = dedupeHistoryItems([...(Array.isArray(history) ? history : []), ...items]);
+  const changed = items.some((incoming) => !previousKeys.has(getHistoryIdentityKey(incoming))) || history.length !== previousKeys.size;
+  if (!changed) {
+    if (!persist) persistHistoryCacheMeta(history, undefined, { persistedCount: Math.min(Array.isArray(history) ? history.length : 0, LOCAL_HISTORY_CACHE_LIMIT) });
+    return;
+  }
+  if (persist) saveHistory();
+  else persistHistoryCacheMeta(history, undefined, { persistedCount: Math.min(Array.isArray(history) ? history.length : 0, LOCAL_HISTORY_CACHE_LIMIT) });
+  scheduleHistoryUIUpdate();
+  if (_fhgState.open) renderFhgGallery();
+  generateMissingThumbnails();
+}
+
+function replaceTasksFromScopedStorage() {
+  tasks = loadStoredArray('nano_tasks');
+  initTasks();
+  renderTasks();
+}
+
+function setAccountStorageScope(userId, options = {}) {
+  setActiveAccountStorageScope(userId);
+  if (options.loadHistory) replaceHistoryFromAccount(loadStoredArray('nano_history'));
+  if (options.loadTasks !== false) replaceTasksFromScopedStorage();
+}
+
+function readScopedStoreSnapshot(baseKey, scope) {
+  const store = readStoredJson(getScopedStorageKey(baseKey, scope), {});
+  return store && typeof store === 'object' ? store : {};
+}
+
+function countScopedCustomEntries(store) {
+  return Object.values(store || {}).reduce((sum, entry) => sum + (Array.isArray(entry && entry.custom) ? entry.custom.length : 0), 0);
+}
+
+async function getScopedLocalAccountData(userId, options = {}) {
+  const scope = userId ? String(userId) : null;
+  const includeHistory = options.includeHistory !== false;
+  const historyItems = includeHistory ? readStoredJson(getScopedStorageKey('nano_history', scope), []) : [];
+  const historyMeta = getScopedHistoryCacheMeta(scope);
+  const titleStore = readScopedStoreSnapshot(TITLE_PRESETS_KEY, scope);
+  const charStore = readScopedStoreSnapshot(CHAR_PRESETS_KEY, scope);
+  const hiddenBuiltinsRaw = readStoredJson(getScopedStorageKey(INSPO_HIDDEN_KEY, scope), []);
+  const nameOverridesRaw = readStoredJson(getScopedStorageKey(INSPO_NAMES_KEY, scope), {});
+  const designMeta = readInspoLocalStateMeta(scope);
+  let customPresets = [];
+  try {
+    customPresets = await _inspoIdbLoadAll(getInspoPresetOwnerKey(scope));
+  } catch (error) {
+    console.warn('Failed to read scoped local account preset cache', error);
+  }
+  const designPresetState = {
+    hiddenBuiltins: Array.isArray(hiddenBuiltinsRaw) ? hiddenBuiltinsRaw : [],
+    nameOverrides: nameOverridesRaw && typeof nameOverridesRaw === 'object' ? nameOverridesRaw : {},
+    customPresets: customPresets.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean),
+    meta: designMeta,
+  };
+  const normalizedHistory = Array.isArray(historyItems) ? dedupeHistoryItems(historyItems) : [];
+  return {
+    history: normalizedHistory,
+    historyMeta,
+    titlePresetStore: titleStore,
+    charPresetStore: charStore,
+    designPresetState,
+    summary: {
+      historyCount: Number.isFinite(Number(historyMeta && historyMeta.count))
+        ? Number(historyMeta.count)
+        : normalizedHistory.length,
+      presetCount: countScopedCustomEntries(titleStore) + countScopedCustomEntries(charStore),
+      customDesignPresetCount: designPresetState.customPresets.length,
+    },
+  };
+}
+
+async function applyAccountData(data, options = {}) {
+  const skipHistory = !!options.skipHistory;
+  applyTextPresetStores(data && data.titlePresetStore ? data.titlePresetStore : {}, data && data.charPresetStore ? data.charPresetStore : {});
+  await applyDesignPresetState(data && data.designPresetState ? data.designPresetState : {});
+  if (!skipHistory) replaceHistoryFromAccount(data && Array.isArray(data.history) ? data.history : []);
+  wizBuildTitleChips();
+  wizBuildCharChips();
+  if (typeof _pmRender === 'function') _pmRender();
+  refreshLocalizedDynamicUi();
+}
+
+async function hydrateHistoryFromScopedCache(userId) {
+  const cached = await getScopedLocalAccountData(userId, { includeHistory: true });
+  replaceHistoryFromAccount(Array.isArray(cached.history) ? cached.history : [], { persist: false });
+  return cached;
+}
+
+function persistHistoryCache() {
+  saveHistory();
+}
+
+async function clearSignedInAccountData() {
+  withAccountSyncSuspended(() => {
+    _wizHiddenBuiltins = new Set();
+    _wizPresetNameOverrides = {};
+    _wizCustomPresets = [];
+  });
+  wizRenderInspoPresets();
+  history = [];
+  scheduleHistoryUIUpdate();
+  if (_fhgState.open) renderFhgGallery();
+  tasks = [];
+  initTasks();
+  renderTasks();
+  clearPreviewDisplay();
+}
+
+function getAccountSummarySnapshot() {
+  const { titleStore, charStore } = getTextPresetStoresSnapshot();
+  const titleCustom = Object.values(titleStore || {}).reduce((sum, entry) => sum + (Array.isArray(entry && entry.custom) ? entry.custom.length : 0), 0);
+  const charCustom = Object.values(charStore || {}).reduce((sum, entry) => sum + (Array.isArray(entry && entry.custom) ? entry.custom.length : 0), 0);
+  return {
+    historyCount: Array.isArray(history) ? history.length : 0,
+    presetCount: titleCustom + charCustom,
+    customDesignPresetCount: Array.isArray(_wizCustomPresets) ? _wizCustomPresets.length : 0,
+  };
+}
+
+window.NanoApp = {
+  setAccountStorageScope,
+  applyAccountData,
+  clearSignedInAccountData,
+  getLegacyMigrationPayload,
+  clearLegacyMigrationData,
+  getTextPresetStoresSnapshot,
+  getDesignPresetStateSnapshot,
+  hasDesignPresetStateContent,
+  getScopedLocalAccountData,
+  getScopedHistoryCacheMeta,
+  hydrateHistoryFromScopedCache,
+  persistHistoryCache,
+  markDesignPresetSyncClean: markInspoLocalStateClean,
+  mergePersistedHistoryItems,
+  getAccountSummarySnapshot,
+  replaceHistoryFromAccount,
+  appendHistoryFromAccount,
+  replaceTasksFromScopedStorage,
+  setHistoryHydrating,
+  clearPreviewDisplay,
+};
 // Init
 initModels();
 initInputs();
 initModelViewerTouchFix();
+initHistoryControls();
 // History UI is lazy — built on first drawer open (see toggleHistory)
 renderTasks();
 initTasks();
 generateMissingThumbnails();
+requestAnimationFrame(autoResizePromptInput);
 
 // Restore saved state or default
 const savedMode = restoreAppState();
@@ -6150,10 +10063,6 @@ if (savedMode) {
   if (savedMode === 'video' && currentVideoTab) {
     switchVideoTab(currentVideoTab);
   }
-  if (savedMode === 'kling3') {
-    if (currentKling3Family) switchKling3Family(currentKling3Family);
-    if (currentKling3Tab) switchKling3Tab(currentKling3Tab);
-  }
   if (savedMode === '3d') {
     update3dUiVisibility();
   }
@@ -6162,4 +10071,36 @@ if (savedMode) {
 }
 
 // Apply i18n LAST — after all selects and models are populated
+hookNewsLocaleUpdates();
 if (window.I18N) window.I18N.init();
+refreshModelNews(true);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

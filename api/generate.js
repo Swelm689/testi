@@ -2,6 +2,7 @@
 // Handles both text-to-image and image-to-image modes
 
 const { requireAuth } = require('../lib/_auth');
+const { uploadBufferToFal } = require('../lib/_fal_upload');
 
 const FAL_API_KEY = process.env.FAL_API_KEY || process.env.FAL_KEY;
 
@@ -69,28 +70,7 @@ function parseDataUri(dataUri) {
 }
 
 async function uploadToFal(fileBuffer, fileName, mimeType) {
-    const FormData = require('form-data');
-    const form = new FormData();
-    form.append('file', fileBuffer, {
-        filename: fileName,
-        contentType: mimeType,
-    });
-
-    const response = await fetch('https://fal.run/fal-ai/storage/upload', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Key ${FAL_API_KEY}`,
-        },
-        body: form,
-    });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to upload file: ${response.statusText}: ${errorText}`);
-    }
-
-    const data = await response.json();
-    return data.url;
+    return uploadBufferToFal(fileBuffer, fileName, mimeType);
 }
 
 async function normalizeImageUrls(imageUrls) {
