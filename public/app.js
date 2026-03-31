@@ -294,8 +294,10 @@ let uploadedKling3RefImages = [];
 
 // Tools mode state
 let uploadedToolsImages = [];
+let uploadedToolsUtilityImage = null;
 const managedUploadRemoteState = Object.create(null);
 let toolsCharsCount = 0;
+let currentToolsTool = 'card-studio';
 let currentKling3Tab = 'v3-text-to-video';
 let currentKling3Family = 'v3';
 let currentLtx23Family = 'text-to-video';
@@ -305,6 +307,41 @@ let kling3SelectedModelByTab = {};
 let kling3LastTabByFamily = { v3: 'v3-text-to-video', o3: 'o3-text-to-video' };
 let kling3ControlsInitialized = false;
 let ltx23SelectedModelByFamily = {};
+
+const TOOLS_TOOL_IDS = new Set(['card-studio', 'enhancer', 'background-removal']);
+const TOOLS_TOOL_MODEL_IDS = {
+  'card-studio': null,
+  enhancer: 'fal-ai/topaz/upscale/image',
+  'background-removal': 'pixelcut/background-removal',
+};
+const TOPAZ_SUBJECT_MODELS = new Set(['Standard V2', 'Recovery V2']);
+const TOPAZ_FACE_MODELS = new Set(['Standard V2', 'Recovery V2']);
+const TOPAZ_SHARPEN_DENOISE_MODELS = new Set(['Standard V2', 'Low Resolution V2', 'CGI', 'High Fidelity V2', 'Text Refine', 'Redefine']);
+const TOPAZ_FIX_COMPRESSION_MODELS = new Set(['Standard V2', 'Low Resolution V2', 'High Fidelity V2', 'Text Refine']);
+const TOPAZ_MODEL_NOTES = {
+  'Standard V2': 'Balanced upscale with subject detection, face enhancement, sharpening, denoise, and compression cleanup.',
+  'Low Resolution V2': 'Best for smaller source files. Supports sharpen, denoise, and fix compression.',
+  'CGI': 'Optimized for renders and synthetic imagery with sharpen and denoise controls.',
+  'High Fidelity V2': 'Preserves realism while allowing sharpen, denoise, and compression cleanup.',
+  'Text Refine': 'Built for text-heavy images. Supports sharpen, denoise, fix compression, and enhancement strength.',
+  'Recovery': 'Simple restoration mode with no extra tuning beyond upscale, crop, and output format.',
+  'Redefine': 'Generative upscale mode with sharpen, denoise, creativity, texture, prompt, and auto prompt.',
+  'Recovery V2': 'Restoration mode with subject detection, face enhancement, and detail recovery.',
+  'Standard MAX': 'High-capacity upscale mode with core controls only.',
+  'Wonder': 'Stylized upscale mode with core controls only.',
+};
+const TOPAZ_RANGE_CONTROLS = [
+  { inputId: 'toolsEnhancerUpscaleFactor', rangeId: 'toolsEnhancerUpscaleFactorRange', min: 1, max: 4, step: 0.1, precision: 1 },
+  { inputId: 'toolsEnhancerFaceStrength', rangeId: 'toolsEnhancerFaceStrengthRange', min: 0, max: 1, step: 0.05, precision: 2 },
+  { inputId: 'toolsEnhancerFaceCreativity', rangeId: 'toolsEnhancerFaceCreativityRange', min: 0, max: 1, step: 0.05, precision: 2 },
+  { inputId: 'toolsEnhancerSharpen', rangeId: 'toolsEnhancerSharpenRange', min: 0, max: 1, step: 0.05, precision: 2 },
+  { inputId: 'toolsEnhancerDenoise', rangeId: 'toolsEnhancerDenoiseRange', min: 0, max: 1, step: 0.05, precision: 2 },
+  { inputId: 'toolsEnhancerFixCompression', rangeId: 'toolsEnhancerFixCompressionRange', min: 0, max: 1, step: 0.05, precision: 2 },
+  { inputId: 'toolsEnhancerStrength', rangeId: 'toolsEnhancerStrengthRange', min: 0.01, max: 1, step: 0.01, precision: 2 },
+  { inputId: 'toolsEnhancerDetail', rangeId: 'toolsEnhancerDetailRange', min: 0, max: 1, step: 0.05, precision: 2 },
+  { inputId: 'toolsEnhancerCreativity', rangeId: 'toolsEnhancerCreativityRange', min: 1, max: 6, step: 1, precision: 0 },
+  { inputId: 'toolsEnhancerTexture', rangeId: 'toolsEnhancerTextureRange', min: 1, max: 5, step: 1, precision: 0 },
+];
 
 function isRemoteAssetItem(item) {
   return !!(item && typeof item === 'object' && item.__remoteAsset && typeof item.url === 'string' && item.url);
@@ -421,6 +458,7 @@ const TOOLS_MODELS = IMAGE_MODELS_EDIT.map((model) => ({
   id: model.id,
   label: model.label.replace(/\s+\(Edit\)$/, ''),
 }));
+TOOLS_TOOL_MODEL_IDS['card-studio'] = DEFAULT_TOOLS_MODEL;
 
 const THREE_D_MODELS = [
   { id: 'fal-ai/meshy/v6-preview/image-to-3d', label: 'Meshy V6 Preview (Image to 3D)', kind: 'image-to-3d', provider: 'fal' },
@@ -1057,6 +1095,8 @@ const ASSET_TARGETS = {
     { label: '3D Retexture → Style Image', i18nKey: 'asset_3d_retexture_style', mode: '3d', inputId: 'threeDRetextureStyleImageInput', select3dModel: 'fal-ai/meshy/v5/retexture' },
     { label: 'Video → Image', i18nKey: 'asset_video_image', mode: 'video', inputId: 'videoImageInput', videoTab: 'image-to-video' },
     { label: 'Video → End Frame', i18nKey: 'asset_video_end_frame', mode: 'video', inputId: 'videoEndImageInput', videoTab: 'image-to-video' },
+    { label: 'Tools → Enhancer Image', mode: 'tools', inputId: 'toolsUtilityImageInput', toolsTool: 'enhancer' },
+    { label: 'Tools → Cutout Image', mode: 'tools', inputId: 'toolsUtilityImageInput', toolsTool: 'background-removal' },
     { label: 'Kling3 → Start Image', i18nKey: 'asset_kling3_start', mode: 'video', inputId: 'kling3StartImageInput', videoTab: 'image-to-video', kling3Tab: 'image-to-video' },
     { label: 'Kling3 → End Image', i18nKey: 'asset_kling3_end', mode: 'video', inputId: 'kling3EndImageInput', videoTab: 'image-to-video', kling3Tab: 'image-to-video' },
   ],
@@ -1143,6 +1183,10 @@ async function applyAsset(item, target) {
     switchMode(target.mode);
   }
 
+  if (target.mode === 'tools' && target.toolsTool) {
+    switchToolsTool(target.toolsTool, { skipSave: true, force: true });
+  }
+
   // 2. Navigate to the correct sub-section within the mode
   if (target.select3dModel) {
     const sel = qs('threeDModel');
@@ -1216,6 +1260,7 @@ const MANAGED_UPLOADS = {
   referenceImagesInput: { labelId: 'refImagesLabel', emptyKey: 'select_images', previewKind: 'image', kind: 'image', multiple: true, getFiles: () => uploadedReferenceImages, setFiles: (next) => { uploadedReferenceImages = next; } },
   videoEndImageInput: { labelId: 'endImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedEndImageFile ? [uploadedEndImageFile] : [], setFiles: (next) => { uploadedEndImageFile = next || null; } },
   audioInput: { labelId: 'audioFileLabel', emptyKey: 'select_audio', kind: 'audio', multiple: false, showFileName: true, getFiles: () => uploadedAudioFile ? [uploadedAudioFile] : [], setFiles: (next) => { uploadedAudioFile = next || null; } },
+  toolsUtilityImageInput: { labelId: 'toolsUtilityImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedToolsUtilityImage ? [uploadedToolsUtilityImage] : [], setFiles: (next) => { uploadedToolsUtilityImage = next || null; } },
   kling3StartImageInput: { labelId: 'kling3StartImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3StartImage ? [uploadedKling3StartImage] : [], setFiles: (next) => { uploadedKling3StartImage = next || null; } },
   kling3EndImageInput: { labelId: 'kling3EndImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3EndImage ? [uploadedKling3EndImage] : [], setFiles: (next) => { uploadedKling3EndImage = next || null; } },
   kling3VideoInput: { labelId: 'kling3VideoLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: false, remoteUrlInputId: 'kling3VideoUrlInput', getFiles: () => uploadedKling3Video ? [uploadedKling3Video] : [], setFiles: (next) => { uploadedKling3Video = next || null; } },
@@ -1485,6 +1530,7 @@ function refreshManagedUploadUi(inputEl) {
   const labelEl = config.labelId ? qs(config.labelId) : null;
   if (labelEl) labelEl.textContent = getManagedUploadLabel(config, files);
   renderCompactPreviewForInput(inputEl, config);
+  if (inputEl.id === 'toolsUtilityImageInput') refreshToolsUtilitySourceUi();
 }
 
 function bindManagedUploadInput(inputEl, config) {
@@ -1857,6 +1903,9 @@ async function reuseFromHistory(index) {
   // 1. Switch to the correct mode
   const normalizedMode = ctx.mode === 'kling3' ? 'video' : ctx.mode;
   if (normalizedMode) switchMode(normalizedMode);
+  if (normalizedMode === 'tools' && ctx.toolsTool) {
+    switchToolsTool(ctx.toolsTool, { skipSave: true, force: true });
+  }
 
   // 2. Restore all select values
   if (ctx.selects) {
@@ -1887,6 +1936,10 @@ async function reuseFromHistory(index) {
   // 5. Navigate to the correct sub-section
   if (normalizedMode === '3d') {
     update3dUiVisibility();
+  }
+  if (normalizedMode === 'tools') {
+    updateToolsEnhancerUi();
+    refreshToolsUtilitySourceUi();
   }
   if (normalizedMode === 'video') {
     await ensureVideoModelsReady();
@@ -4584,7 +4637,7 @@ function switchMode(mode) {
       animateSection(el);
     }
     initToolsControls();
-    enterWizFullscreen();
+    switchToolsTool(currentToolsTool, { skipSave: true, force: true });
   } else {
     exitWizFullscreen();
   }
@@ -4702,6 +4755,220 @@ const WIZ_FONTS = [
   { name: 'Chalk', css: "font-weight:400;font-family:'Segoe Script','Bradley Hand',cursive;letter-spacing:0.03em;font-size:1.1rem;opacity:0.9;", val: 'wiz_font_chalk' },
 ];
 
+function getToolsUtilitySource() {
+  return getManagedUploadPrimarySource(MANAGED_UPLOADS.toolsUtilityImageInput, uploadedToolsUtilityImage);
+}
+
+function getActiveToolsModelId() {
+  if (currentToolsTool === 'enhancer') return TOOLS_TOOL_MODEL_IDS.enhancer;
+  if (currentToolsTool === 'background-removal') return TOOLS_TOOL_MODEL_IDS['background-removal'];
+  return qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
+}
+
+function refreshToolsUtilitySourceUi() {
+  const config = MANAGED_UPLOADS.toolsUtilityImageInput;
+  const source = getToolsUtilitySource();
+  const labelText = getManagedUploadLabel(config, getManagedUploadFiles(config));
+  const hintText = source
+    ? 'Shared source image is ready for every utility tool.'
+    : 'PNG, JPG, WebP, HEIC';
+
+  const enhancerLabel = qs('toolsUtilityImageLabel');
+  if (enhancerLabel) enhancerLabel.textContent = labelText || 'Click or drag a source image';
+  const enhancerHint = qs('toolsUtilityImageHint');
+  if (enhancerHint) enhancerHint.textContent = hintText;
+
+  const bgLabel = qs('toolsBgRemovalImageLabel');
+  if (bgLabel) bgLabel.textContent = source ? 'Source image ready for cutout' : 'Click or drag a source image';
+  const bgHint = qs('toolsBgRemovalImageHint');
+  if (bgHint) {
+    bgHint.textContent = source
+      ? 'You can switch between Enhancer and Cutout without re-uploading.'
+      : 'Drop once, then switch between utility tools freely';
+  }
+
+  ['toolsUtilityImageDropzone', 'toolsBgRemovalDropzone'].forEach((zoneId) => {
+    const zone = qs(zoneId);
+    if (zone) zone.classList.toggle('is-loaded', !!source);
+  });
+}
+
+function clampEnhancerValue(value, meta) {
+  if (!meta) return value;
+  const min = Number(meta.min);
+  const max = Number(meta.max);
+  const step = Number(meta.step) || 1;
+  const precision = Number.isFinite(meta.precision) ? meta.precision : (String(step).includes('.') ? String(step).split('.')[1].length : 0);
+  let next = Number(value);
+  if (!Number.isFinite(next)) next = Number.isFinite(min) ? min : 0;
+  if (Number.isFinite(min)) next = Math.max(min, next);
+  if (Number.isFinite(max)) next = Math.min(max, next);
+  if (step > 0 && Number.isFinite(min)) {
+    next = min + Math.round((next - min) / step) * step;
+  }
+  next = Number(next.toFixed(precision));
+  return next;
+}
+
+function formatEnhancerValue(value, meta) {
+  const precision = Number.isFinite(meta && meta.precision)
+    ? meta.precision
+    : (meta && String(meta.step || '').includes('.') ? String(meta.step).split('.')[1].length : 0);
+  return precision > 0 ? Number(value).toFixed(precision) : String(Math.round(Number(value)));
+}
+
+function syncEnhancerRangeControl(meta, source = 'input', emit = false) {
+  if (!meta) return;
+  const inputEl = qs(meta.inputId);
+  const rangeEl = qs(meta.rangeId);
+  if (!inputEl || !rangeEl) return;
+  const rawValue = source === 'range' ? rangeEl.value : inputEl.value;
+  const next = clampEnhancerValue(rawValue, meta);
+  const nextStr = formatEnhancerValue(next, meta);
+  inputEl.value = nextStr;
+  rangeEl.value = nextStr;
+  const min = Number(meta.min);
+  const max = Number(meta.max);
+  const percent = Number.isFinite(min) && Number.isFinite(max) && max > min
+    ? ((next - min) / (max - min)) * 100
+    : 0;
+  rangeEl.style.setProperty('--range-fill', `${Math.max(0, Math.min(100, percent))}%`);
+  if (emit) {
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+
+function initToolsEnhancerRanges() {
+  TOPAZ_RANGE_CONTROLS.forEach((meta) => {
+    const inputEl = qs(meta.inputId);
+    const rangeEl = qs(meta.rangeId);
+    if (!inputEl || !rangeEl || rangeEl._topazBound) return;
+    rangeEl._topazBound = true;
+
+    syncEnhancerRangeControl(meta, 'input', false);
+
+    rangeEl.addEventListener('input', () => syncEnhancerRangeControl(meta, 'range', true));
+    rangeEl.addEventListener('change', () => syncEnhancerRangeControl(meta, 'range', true));
+    inputEl.addEventListener('input', () => syncEnhancerRangeControl(meta, 'input', false));
+    inputEl.addEventListener('change', () => syncEnhancerRangeControl(meta, 'input', false));
+    inputEl.addEventListener('blur', () => syncEnhancerRangeControl(meta, 'input', false));
+  });
+}
+
+function updateToolsEnhancerUi() {
+  const model = qs('toolsEnhancerModel') ? qs('toolsEnhancerModel').value : 'Standard V2';
+  const showSubject = TOPAZ_SUBJECT_MODELS.has(model);
+  const showFace = TOPAZ_FACE_MODELS.has(model);
+  const faceEnabled = !!(showFace && qs('toolsEnhancerFaceEnhancement') && qs('toolsEnhancerFaceEnhancement').checked);
+  const showSharpenDenoise = TOPAZ_SHARPEN_DENOISE_MODELS.has(model);
+  const showFixCompression = TOPAZ_FIX_COMPRESSION_MODELS.has(model);
+  const showStrength = model === 'Text Refine';
+  const showDetail = model === 'Recovery V2';
+  const showGenerative = model === 'Redefine';
+
+  const setVisible = (id, visible) => {
+    const el = qs(id);
+    if (el) el.style.display = visible ? '' : 'none';
+  };
+
+  setVisible('toolsEnhancerSubjectField', showSubject);
+  setVisible('toolsEnhancerFaceToggleField', showFace);
+  setVisible('toolsEnhancerFaceStrengthField', faceEnabled);
+  setVisible('toolsEnhancerFaceCreativityField', faceEnabled);
+  setVisible('toolsEnhancerSharpenField', showSharpenDenoise);
+  setVisible('toolsEnhancerDenoiseField', showSharpenDenoise);
+  setVisible('toolsEnhancerFixCompressionField', showFixCompression);
+  setVisible('toolsEnhancerStrengthField', showStrength);
+  setVisible('toolsEnhancerDetailField', showDetail);
+  setVisible('toolsEnhancerCreativityField', showGenerative);
+  setVisible('toolsEnhancerTextureField', showGenerative);
+  setVisible('toolsEnhancerAutopromptField', showGenerative);
+  setVisible('toolsEnhancerPromptField', showGenerative);
+
+  const noteEl = qs('toolsEnhancerModelNote');
+  if (noteEl) {
+    const note = TOPAZ_MODEL_NOTES[model] || 'Only settings supported by the selected Topaz model are shown below.';
+    noteEl.textContent = note;
+  }
+
+  TOPAZ_RANGE_CONTROLS.forEach((meta) => syncEnhancerRangeControl(meta, 'input', false));
+}
+
+function switchToolsTool(tool, options = {}) {
+  const nextTool = TOOLS_TOOL_IDS.has(tool) ? tool : 'card-studio';
+  if (!options.force && currentToolsTool === nextTool) {
+    if (currentMode === 'tools') {
+      if (nextTool === 'card-studio') enterWizFullscreen();
+      else exitWizFullscreen();
+    }
+    return;
+  }
+  currentToolsTool = nextTool;
+
+  document.querySelectorAll('[data-tools-tool]').forEach((btn) => {
+    btn.classList.toggle('tools-suite-tab-active', btn.dataset.toolsTool === currentToolsTool);
+  });
+
+  const workspaces = {
+    'card-studio': qs('toolsCardStudioWorkspace'),
+    enhancer: qs('toolsEnhancerWorkspace'),
+    'background-removal': qs('toolsBgRemovalWorkspace'),
+  };
+
+  Object.entries(workspaces).forEach(([id, el]) => {
+    if (!el) return;
+    const isActive = id === currentToolsTool;
+    el.classList.toggle('tools-workspace-active', isActive);
+    el.style.display = isActive ? 'block' : 'none';
+  });
+
+  if (currentMode === 'tools') {
+    if (currentToolsTool === 'card-studio') enterWizFullscreen();
+    else exitWizFullscreen();
+  }
+
+  updateToolsEnhancerUi();
+  refreshToolsUtilitySourceUi();
+  if (!options.skipSave) saveAppState();
+  requestAnimationFrame(() => {
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
+  });
+}
+window.switchToolsTool = switchToolsTool;
+
+function initToolsUtilityControls() {
+  const utilityInput = qs('toolsUtilityImageInput');
+  if (!utilityInput || utilityInput._toolsUtilityBound) {
+    initToolsEnhancerRanges();
+    refreshToolsUtilitySourceUi();
+    updateToolsEnhancerUi();
+    return;
+  }
+
+  utilityInput._toolsUtilityBound = true;
+  bindManagedUploadById('toolsUtilityImageInput');
+  setupDropZone(qs('toolsUtilityImageDropzone'), utilityInput);
+  setupDropZone(qs('toolsBgRemovalDropzone'), utilityInput);
+
+  const enhancerModel = qs('toolsEnhancerModel');
+  if (enhancerModel) enhancerModel.addEventListener('change', () => {
+    updateToolsEnhancerUi();
+    saveAppState();
+  });
+  const enhancerFace = qs('toolsEnhancerFaceEnhancement');
+  if (enhancerFace) enhancerFace.addEventListener('change', () => {
+    updateToolsEnhancerUi();
+    saveAppState();
+  });
+
+  initToolsEnhancerRanges();
+  refreshToolsUtilitySourceUi();
+  updateToolsEnhancerUi();
+}
+
 function initToolsControls() {
   if (_toolsInitialized) return;
   _toolsInitialized = true;
@@ -4730,6 +4997,7 @@ function initToolsControls() {
   wizLoadInspoPresets();
   wizInitInspoUpload();
   wizUpdateToolsSettings();
+  initToolsUtilityControls();
 
   // Hook into locale application (covers both init() and setLang()) to rebuild chips
   if (!window._wizLangHooked && window.I18N && window.I18N.applyLocale) {
@@ -6086,6 +6354,82 @@ photorealistic \u00b7 award-winning product photography \u00b7 ultra-sharp focus
 }
 
 async function submitToolsRequest(task) {
+  if (task && task.toolsTool === 'enhancer') {
+    const imageSource = getToolsUtilitySource();
+    const imageUrl = await resolveUploadItemUrl(imageSource, 'tools-enhancer-image', task);
+    if (!imageUrl) throw new Error(window.I18N ? I18N.t('select_image') : 'Select image');
+
+    const enhancerModel = qs('toolsEnhancerModel') ? qs('toolsEnhancerModel').value : 'Standard V2';
+    const enhancerBody = {
+      model_id: TOOLS_TOOL_MODEL_IDS.enhancer,
+      image_url: imageUrl,
+      model: enhancerModel,
+      upscale_factor: Number(qs('toolsEnhancerUpscaleFactor') ? qs('toolsEnhancerUpscaleFactor').value : 2) || 2,
+      crop_to_fill: !!(qs('toolsEnhancerCropToFill') && qs('toolsEnhancerCropToFill').checked),
+      output_format: qs('toolsEnhancerOutputFormat') ? qs('toolsEnhancerOutputFormat').value : 'jpeg',
+    };
+
+    if (TOPAZ_SUBJECT_MODELS.has(enhancerModel)) {
+      enhancerBody.subject_detection = qs('toolsEnhancerSubjectDetection') ? qs('toolsEnhancerSubjectDetection').value : 'All';
+    }
+    if (TOPAZ_FACE_MODELS.has(enhancerModel)) {
+      enhancerBody.face_enhancement = !!(qs('toolsEnhancerFaceEnhancement') && qs('toolsEnhancerFaceEnhancement').checked);
+      if (enhancerBody.face_enhancement) {
+        enhancerBody.face_enhancement_creativity = Number(qs('toolsEnhancerFaceCreativity') ? qs('toolsEnhancerFaceCreativity').value : 0) || 0;
+        enhancerBody.face_enhancement_strength = Number(qs('toolsEnhancerFaceStrength') ? qs('toolsEnhancerFaceStrength').value : 0.8) || 0.8;
+      }
+    }
+    if (TOPAZ_SHARPEN_DENOISE_MODELS.has(enhancerModel)) {
+      enhancerBody.sharpen = Number(qs('toolsEnhancerSharpen') ? qs('toolsEnhancerSharpen').value : 0) || 0;
+      enhancerBody.denoise = Number(qs('toolsEnhancerDenoise') ? qs('toolsEnhancerDenoise').value : 0) || 0;
+    }
+    if (TOPAZ_FIX_COMPRESSION_MODELS.has(enhancerModel)) {
+      enhancerBody.fix_compression = Number(qs('toolsEnhancerFixCompression') ? qs('toolsEnhancerFixCompression').value : 0) || 0;
+    }
+    if (enhancerModel === 'Text Refine') {
+      enhancerBody.strength = Number(qs('toolsEnhancerStrength') ? qs('toolsEnhancerStrength').value : 0.5) || 0.5;
+    }
+    if (enhancerModel === 'Redefine') {
+      enhancerBody.creativity = Number(qs('toolsEnhancerCreativity') ? qs('toolsEnhancerCreativity').value : 3) || 3;
+      enhancerBody.texture = Number(qs('toolsEnhancerTexture') ? qs('toolsEnhancerTexture').value : 3) || 3;
+      const redefinePrompt = qs('toolsEnhancerPrompt') ? qs('toolsEnhancerPrompt').value.trim() : '';
+      if (redefinePrompt) enhancerBody.prompt = redefinePrompt;
+      if (qs('toolsEnhancerAutoprompt') && qs('toolsEnhancerAutoprompt').checked) enhancerBody.autoprompt = true;
+    }
+    if (enhancerModel === 'Recovery V2') {
+      enhancerBody.detail = Number(qs('toolsEnhancerDetail') ? qs('toolsEnhancerDetail').value : 0.5) || 0.5;
+    }
+
+    const enhancerRes = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(enhancerBody),
+    });
+    if (!enhancerRes.ok) throw await createResponseError(enhancerRes, 'Image enhancement failed');
+    return await enhancerRes.json();
+  }
+
+  if (task && task.toolsTool === 'background-removal') {
+    const imageSource = getToolsUtilitySource();
+    const imageUrl = await resolveUploadItemUrl(imageSource, 'tools-cutout-image', task);
+    if (!imageUrl) throw new Error(window.I18N ? I18N.t('select_image') : 'Select image');
+
+    const bgBody = {
+      model_id: TOOLS_TOOL_MODEL_IDS['background-removal'],
+      image_url: imageUrl,
+      output_format: qs('toolsBgOutputFormat') ? qs('toolsBgOutputFormat').value : 'rgba',
+      sync_mode: !!(qs('toolsBgSyncMode') && qs('toolsBgSyncMode').value === 'true'),
+    };
+
+    const bgRes = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bgBody),
+    });
+    if (!bgRes.ok) throw await createResponseError(bgRes, 'Background removal failed');
+    return await bgRes.json();
+  }
+
   const modelId = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
   const isNano2 = modelId === 'nano-banana-2/edit';
   const isGpt = modelId === 'gpt-image-1.5/edit';
@@ -9122,6 +9466,7 @@ function captureGenerationContext() {
     videoTab: currentVideoTab,
     kling3Family: currentKling3Family,
     kling3Tab: currentKling3Tab,
+    toolsTool: currentToolsTool,
     prompt: qs('promptInput') ? qs('promptInput').value : '',
     selects: {},
     inputs: {},
@@ -9149,7 +9494,16 @@ async function handleGenerate() {
   // Tools mode: assemble prompt from form fields instead of promptInput
   let prompt;
   if (currentMode === 'tools') {
-    prompt = '/' + assembleWbCardPrompt(uploadedToolsImages.length);
+    if (currentToolsTool === 'card-studio') {
+      prompt = '/' + assembleWbCardPrompt(uploadedToolsImages.length);
+    } else if (currentToolsTool === 'enhancer') {
+      const model = qs('toolsEnhancerModel') ? qs('toolsEnhancerModel').value : 'Standard V2';
+      const factor = qs('toolsEnhancerUpscaleFactor') ? qs('toolsEnhancerUpscaleFactor').value : '2';
+      prompt = `Topaz Enhancer · ${model} · ${factor}x`;
+    } else {
+      const format = qs('toolsBgOutputFormat') ? qs('toolsBgOutputFormat').value : 'rgba';
+      prompt = `Background Removal · ${format}`;
+    }
   } else {
     const _rawPrompt = qs('promptInput') ? substituteImageRefs(qs('promptInput').value.trim()) : '';
     prompt = _rawPrompt ? `/${_rawPrompt}` : '';
@@ -9246,10 +9600,15 @@ async function handleGenerate() {
     }
   }
 
+  if (currentMode === 'tools' && currentToolsTool !== 'card-studio' && !getToolsUtilitySource()) {
+    showToast(window.I18N ? I18N.t('select_image') : 'Select image', 'error');
+    return;
+  }
+
   const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   let model_id;
-  if (currentMode === 'tools') model_id = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
+  if (currentMode === 'tools') model_id = getActiveToolsModelId();
   else if (currentMode === 'text') model_id = qs('imageModelText') ? qs('imageModelText').value : DEFAULT_IMAGE_TEXT_MODEL;
   else if (currentMode === 'image') model_id = qs('imageModelEdit') ? qs('imageModelEdit').value : DEFAULT_IMAGE_EDIT_MODEL;
   else if (currentMode === 'video') model_id = qs('videoModel') ? qs('videoModel').value : '';
@@ -9259,6 +9618,7 @@ async function handleGenerate() {
   const task = {
     id,
     mode: currentMode,
+    toolsTool: currentMode === 'tools' ? currentToolsTool : null,
     prompt,
     model_id,
     status: 'QUEUED',
@@ -9550,11 +9910,14 @@ async function wizIdbSaveImages() {
     // Convert ALL files BEFORE opening the transaction to avoid TransactionInactiveError
     const prodArr = await Promise.all(uploadedToolsImages.map(toB64));
     const inspoArr = await Promise.all(uploadedInspoImages.map(toB64));
+    const utilitySource = getToolsUtilitySource();
+    const utilityItem = utilitySource ? await toB64(utilitySource) : null;
     const db = await _wizIdbOpen();
     const tx = db.transaction('files', 'readwrite');
     const store = tx.objectStore('files');
     store.put(prodArr, 'productImages');
     store.put(inspoArr, 'inspoImages');
+    store.put(utilityItem, 'utilityImage');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
     db.close();
   } catch (e) { console.warn('IDB save failed', e); }
@@ -9563,17 +9926,20 @@ async function wizIdbRestoreImages() {
   try {
     const db = await _wizIdbOpen();
     // Issue BOTH requests synchronously before any await to keep the transaction active
-    const [prodArr, inspoArr] = await new Promise((resolve, reject) => {
+    const [prodArr, inspoArr, utilityItem] = await new Promise((resolve, reject) => {
       const tx = db.transaction('files', 'readonly');
       const store = tx.objectStore('files');
       const prodReq = store.get('productImages');
       const inspoReq = store.get('inspoImages');
-      let prod, inspo, prodDone = false, inspoDone = false;
-      const check = () => { if (prodDone && inspoDone) resolve([prod, inspo]); };
+      const utilityReq = store.get('utilityImage');
+      let prod, inspo, utility, prodDone = false, inspoDone = false, utilityDone = false;
+      const check = () => { if (prodDone && inspoDone && utilityDone) resolve([prod, inspo, utility]); };
       prodReq.onsuccess  = () => { prod  = prodReq.result  || null; prodDone  = true; check(); };
       prodReq.onerror    = () => { prod  = null;                     prodDone  = true; check(); };
       inspoReq.onsuccess = () => { inspo = inspoReq.result || null; inspoDone = true; check(); };
       inspoReq.onerror   = () => { inspo = null;                    inspoDone = true; check(); };
+      utilityReq.onsuccess = () => { utility = utilityReq.result || null; utilityDone = true; check(); };
+      utilityReq.onerror   = () => { utility = null; utilityDone = true; check(); };
       tx.onerror = reject;
     });
     db.close();
@@ -9595,6 +9961,16 @@ async function wizIdbRestoreImages() {
       uploadedInspoImages = inspoArr.map(b64ToFile).filter(Boolean);
       wizRenderInspoThumbs();
     }
+    const restoredUtilitySource = b64ToFile(utilityItem);
+    if (isRemoteAssetItem(restoredUtilitySource)) {
+      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityImageInput, restoredUtilitySource);
+      uploadedToolsUtilityImage = null;
+    } else {
+      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityImageInput, []);
+      uploadedToolsUtilityImage = restoredUtilitySource;
+    }
+    const utilityInput = qs('toolsUtilityImageInput');
+    if (utilityInput && utilityInput._uploadConfig) refreshManagedUploadUi(utilityInput);
   } catch (e) { console.warn('IDB restore failed', e); }
 }
 
@@ -9619,6 +9995,8 @@ const PERSISTED_SELECTS = [
   'kling3MotionOrientation', 'kling3KeepOriginalSound',
   'aspectRatioBase',
   'toolsModel', 'toolsResolution', 'toolsAspectRatio', 'toolsWebSearch', 'toolsGoogleSearch',
+  'toolsEnhancerModel', 'toolsEnhancerOutputFormat', 'toolsEnhancerSubjectDetection', 'toolsEnhancerCreativity', 'toolsEnhancerTexture',
+  'toolsBgOutputFormat', 'toolsBgSyncMode',
 ];
 
 const PERSISTED_INPUTS = [
@@ -9629,10 +10007,14 @@ const PERSISTED_INPUTS = [
   'kling3VoiceIds', 'kling3NegativePrompt', 'kling3VideoUrlInput',
   'nano2Seed', 'editNano2Seed',
   'toolsTitleInput', 'toolsFontInput', 'toolsWishesInput', 'toolsSeed',
+  'toolsEnhancerUpscaleFactor', 'toolsEnhancerFaceStrength', 'toolsEnhancerFaceCreativity',
+  'toolsEnhancerSharpen', 'toolsEnhancerDenoise', 'toolsEnhancerFixCompression',
+  'toolsEnhancerStrength', 'toolsEnhancerDetail', 'toolsEnhancerPrompt',
 ];
 
 const PERSISTED_CHECKBOXES = [
   'toolsInspoMatchBg',
+  'toolsEnhancerCropToFill', 'toolsEnhancerFaceEnhancement', 'toolsEnhancerAutoprompt',
 ];
 
 function saveAppState() {
@@ -9642,6 +10024,7 @@ function saveAppState() {
       videoTab: currentVideoTab,
       kling3Family: currentKling3Family,
       kling3Tab: currentKling3Tab,
+      toolsTool: currentToolsTool,
       selects: {},
       inputs: {},
       checkboxes: {},
@@ -9716,6 +10099,7 @@ function restoreAppState() {
     if (state.videoTab) currentVideoTab = state.videoTab;
     if (state.kling3Family) currentKling3Family = state.kling3Family;
     if (state.kling3Tab) currentKling3Tab = state.kling3Tab;
+    if (state.toolsTool && TOOLS_TOOL_IDS.has(state.toolsTool)) currentToolsTool = state.toolsTool;
     if (!state.videoTab && state.kling3Tab) {
       const mappedVideoTab = getVideoTabForKling3Tab(state.kling3Tab);
       if (mappedVideoTab) currentVideoTab = mappedVideoTab;
@@ -9768,6 +10152,8 @@ function hookPersistence() {
 
 function refreshLocalizedDynamicUi() {
   refreshAllManagedUploads();
+  refreshToolsUtilitySourceUi();
+  updateToolsEnhancerUi();
   localizeVideoOptionFields(qs('videoOptionsDynamic'));
   if (typeof renderKling3Elements === 'function') renderKling3Elements();
 

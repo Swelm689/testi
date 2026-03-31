@@ -42,6 +42,18 @@ const IMAGE_MODELS = {
         kind: 'image-to-image',
         allowed: ['prompt', 'image_urls', 'image_size', 'background', 'quality', 'input_fidelity', 'num_images', 'output_format', 'sync_mode', 'mask_image_url'],
     },
+    'pixelcut/background-removal': {
+        endpoint: 'https://queue.fal.run/pixelcut/background-removal',
+        kind: 'image-to-image',
+        allowed: ['image_url', 'output_format', 'sync_mode'],
+        requiresPrompt: false,
+    },
+    'fal-ai/topaz/upscale/image': {
+        endpoint: 'https://queue.fal.run/fal-ai/topaz/upscale/image',
+        kind: 'image-to-image',
+        allowed: ['model', 'upscale_factor', 'crop_to_fill', 'image_url', 'output_format', 'subject_detection', 'face_enhancement', 'face_enhancement_creativity', 'face_enhancement_strength', 'sharpen', 'denoise', 'fix_compression', 'strength', 'creativity', 'texture', 'prompt', 'autoprompt', 'detail'],
+        requiresPrompt: false,
+    },
 };
 
 function pickAllowed(obj, allowed) {
@@ -95,6 +107,20 @@ async function normalizeImageUrls(imageUrls) {
     return out;
 }
 
+async function normalizeSingleImageUrl(imageUrl) {
+    if (!imageUrl) return null;
+    const value = String(imageUrl);
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+        return value;
+    }
+    const parsed = parseDataUri(value);
+    if (!parsed) {
+        throw new Error('Invalid image input. Provide an https URL or data URI.');
+    }
+    const ext = parsed.mimeType === 'image/png' ? 'png' : (parsed.mimeType === 'image/webp' ? 'webp' : 'jpg');
+    return uploadToFal(parsed.buffer, `upload-${Date.now()}.${ext}`, parsed.mimeType);
+}
+
 module.exports = async function handler(req, res) {
     // Enable CORS
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
@@ -125,19 +151,21 @@ module.exports = async function handler(req, res) {
             return res.status(400).json({ error: `Unknown model_id: ${model_id}` });
         }
 
-        const { prompt } = body;
+        const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+        const requiresPrompt = model.requiresPrompt !== false;
 
-        if (!prompt) {
+        if (requiresPrompt && !prompt) {
             return res.status(400).json({ error: 'Prompt is required' });
         }
 
         const rawPayload = {
             ...body,
-            prompt,
         };
+        if (prompt) rawPayload.prompt = prompt;
 
         const allowed = Array.isArray(model.allowed) ? model.allowed : [];
         const supportsImageUrls = allowed.includes('image_urls');
+        const supportsImageUrl = allowed.includes('image_url');
 
         const maxImageUrlsByModel = {
             'nano-banana-pro/edit': 14,
@@ -162,6 +190,10 @@ module.exports = async function handler(req, res) {
             if (Array.isArray(rawPayload.image_urls)) {
                 rawPayload.image_urls = await normalizeImageUrls(rawPayload.image_urls);
             }
+        }
+
+        if (supportsImageUrl && typeof rawPayload.image_url === 'string' && rawPayload.image_url) {
+            rawPayload.image_url = await normalizeSingleImageUrl(rawPayload.image_url);
         }
 
         if (typeof rawPayload.mask_image_url === 'string' && rawPayload.mask_image_url.startsWith('data:')) {
