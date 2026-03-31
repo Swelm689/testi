@@ -7,14 +7,28 @@ if (window.lucide && typeof window.lucide.createIcons === 'function') {
 let currentMode = 'text';
 let currentVideoTab = 'text-to-video';
 let activeAccountStorageScope = null;
+let hasExplicitAccountStorageScope = false;
 let accountSyncSuspendCount = 0;
+
+function getBridgeAccountStorageScope() {
+  try {
+    const bridge = window.NanoAccountBridge || null;
+    if (!bridge || typeof bridge.getScopedUserId !== 'function') return null;
+    const userId = bridge.getScopedUserId();
+    return userId ? String(userId) : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function setActiveAccountStorageScope(userId) {
   activeAccountStorageScope = userId ? String(userId) : null;
+  hasExplicitAccountStorageScope = true;
 }
 
 function getActiveAccountStorageScope() {
-  return activeAccountStorageScope || null;
+  if (hasExplicitAccountStorageScope) return activeAccountStorageScope || null;
+  return getBridgeAccountStorageScope() || null;
 }
 
 function getScopedStorageKey(baseKey, explicitScope) {
@@ -4742,10 +4756,11 @@ function initToolsControls() {
     // Auto-resize title if restored
     requestAnimationFrame(() => { const t = qs('toolsTitleInput'); if (t) wizAutoResize(t); });
     // Restore selected presets (after presets are loaded)
-    if (rs.selectedPresets && rs.selectedPresets.length > 0) {
+    if (rs.selectedPresets && rs.selectedPresets.length > 0 && !hasStoredInspoSelectedPresets()) {
       const waitPresets = () => {
         if (_wizInspoPresets.length > 0 || document.querySelector('.wiz-inspo-empty')) {
           _wizSelectedPresets = new Set(rs.selectedPresets);
+          persistInspoSelectedPresets();
           const container = document.getElementById('wizInspoPresets');
           if (container) container.querySelectorAll('.wiz-inspo-card').forEach(c => c.classList.toggle('wiz-inspo-on', _wizSelectedPresets.has(c.dataset.presetId)));
         } else {
@@ -5475,6 +5490,7 @@ let uploadedInspoImages = [];       // kept for backwards compat
 const INSPO_HIDDEN_KEY  = 'nano_inspo_hidden';
 const INSPO_NAMES_KEY   = 'nano_inspo_names';
 const INSPO_STATE_META_KEY = 'nano_inspo_state_meta';
+const INSPO_SELECTED_KEY = 'nano_inspo_selected';
 const INSPO_IDB_NAME    = 'nano_custom_presets_db';
 const INSPO_IDB_STORE   = 'presets';
 
@@ -5602,6 +5618,52 @@ function inspoLoadLocalMeta() {
   try { _wizHiddenBuiltins = new Set(JSON.parse(localStorage.getItem(getScopedStorageKey(INSPO_HIDDEN_KEY)) || '[]')); } catch(_) { _wizHiddenBuiltins = new Set(); }
   try { _wizPresetNameOverrides = JSON.parse(localStorage.getItem(getScopedStorageKey(INSPO_NAMES_KEY)) || '{}'); } catch(_) { _wizPresetNameOverrides = {}; }
 }
+
+function getAvailableInspoPresetIds() {
+  const ids = new Set();
+  (_wizInspoPresets || []).forEach((preset) => {
+    if (preset && preset.id && preset.thumb && !_wizHiddenBuiltins.has(preset.id)) ids.add(preset.id);
+  });
+  (_wizCustomPresets || []).forEach((preset) => {
+    if (preset && preset.id) ids.add(preset.id);
+  });
+  return ids;
+}
+
+function persistInspoSelectedPresets(explicitScope) {
+  const availableIds = getAvailableInspoPresetIds();
+  const nextSelected = Array.from(_wizSelectedPresets || []).filter((id) => availableIds.has(id));
+  _wizSelectedPresets = new Set(nextSelected);
+  try {
+    localStorage.setItem(getScopedStorageKey(INSPO_SELECTED_KEY, explicitScope), JSON.stringify(nextSelected));
+  } catch (_) {}
+}
+
+function hasStoredInspoSelectedPresets(explicitScope) {
+  try {
+    return Array.isArray(JSON.parse(localStorage.getItem(getScopedStorageKey(INSPO_SELECTED_KEY, explicitScope)) || 'null'));
+  } catch (_) {
+    return false;
+  }
+}
+
+function restoreInspoSelectedPresets(explicitScope) {
+  let stored = [];
+  try {
+    stored = JSON.parse(localStorage.getItem(getScopedStorageKey(INSPO_SELECTED_KEY, explicitScope)) || '[]');
+  } catch (_) {
+    stored = [];
+  }
+  const availableIds = getAvailableInspoPresetIds();
+  const nextSelected = Array.isArray(stored)
+    ? stored.filter((id) => typeof id === 'string' && availableIds.has(id))
+    : [];
+  _wizSelectedPresets = new Set(nextSelected);
+  if (Array.isArray(stored) && nextSelected.length !== stored.length) {
+    persistInspoSelectedPresets(explicitScope);
+  }
+}
+
 function inspoSaveLocalMeta(options = {}) {
   try {
     localStorage.setItem(getScopedStorageKey(INSPO_HIDDEN_KEY), JSON.stringify([..._wizHiddenBuiltins]));
@@ -5624,6 +5686,7 @@ async function wizLoadInspoPresets() {
     _wizCustomPresets = await _inspoIdbLoadAll();
     _wizCustomPresets.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
   } catch(e) { console.warn('Failed to load custom presets', e); }
+  restoreInspoSelectedPresets();
   wizRenderInspoPresets();
 }
 
@@ -5698,6 +5761,7 @@ function wizRenderInspoPresets() {
       if (_wizSelectedPresets.has(p.id)) _wizSelectedPresets.delete(p.id);
       else _wizSelectedPresets.add(p.id);
       card.classList.toggle('wiz-inspo-on', _wizSelectedPresets.has(p.id));
+      persistInspoSelectedPresets();
       saveAppState();
     };
     wrap.appendChild(card);
@@ -5768,10 +5832,11 @@ function inspoShowNameModal(dataUrl, suggestedName) {
   save.onclick = async () => {
     const name = inp.value.trim() || suggestedName || 'Custom Preset';
     const id = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-    const preset = { id, name, dataUrl, addedAt: Date.now() };
+    const preset = { id, name, dataUrl, addedAt: Date.now(), ownerKey: getInspoPresetOwnerKey() };
     _wizCustomPresets.push(preset);
     try { await _inspoIdbSave(preset); } catch(e) { console.warn('Failed to save preset to IDB', e); }
     markInspoLocalStateDirty();
+    persistInspoSelectedPresets();
     cancel.onclick();
     wizRenderInspoPresets();
     saveAppState();
@@ -5827,10 +5892,11 @@ async function inspoDeletePreset(id, isCustom) {
     markInspoLocalStateDirty();
   } else {
     _wizHiddenBuiltins.add(id);
-    inspoSaveLocalMeta();
   }
   _wizSelectedPresets.delete(id);
   delete _wizPresetNameOverrides[id];
+  inspoSaveLocalMeta();
+  persistInspoSelectedPresets();
   wizRenderInspoPresets();
   saveAppState();
 }
@@ -5856,18 +5922,31 @@ function wizInitInspoUpload() {}
 
 function wizRenderInspoThumbs() {}  // kept for backwards compat
 
-function getInspoPresetUrls() {
-  const urls = [];
-  _wizSelectedPresets.forEach(id => {
-    const builtin = _wizInspoPresets.find(x => x.id === id);
+function getInspoPresetSources() {
+  const sources = [];
+  _wizSelectedPresets.forEach((id) => {
+    const builtin = _wizInspoPresets.find((x) => x.id === id);
     if (builtin && builtin.thumb) {
-      urls.push(builtin.thumb.startsWith('http') ? builtin.thumb : window.location.origin + builtin.thumb);
+      const absoluteUrl = builtin.thumb.startsWith('http') ? builtin.thumb : `${window.location.origin}${builtin.thumb}`;
+      sources.push(createRemoteAssetItem({
+        url: absoluteUrl,
+        type: 'image',
+        filename: deriveFilenameFromUrl(absoluteUrl, 'jpg'),
+      }));
       return;
     }
-    const custom = _wizCustomPresets.find(x => x.id === id);
-    if (custom && (custom.src || custom.dataUrl)) urls.push(custom.src || custom.dataUrl);
+    const custom = _wizCustomPresets.find((x) => x.id === id);
+    if (!custom) return;
+    const src = custom.src || custom.dataUrl || null;
+    if (!src) return;
+    sources.push(createRemoteAssetItem({
+      url: src,
+      type: 'image',
+      filename: `${custom.name || custom.id || 'preset'}.png`,
+      mimeHint: 'image/png',
+    }));
   });
-  return urls;
+  return sources.filter(Boolean);
 }
 
 // ---- WB CARD PROMPT ASSEMBLY ----
@@ -5885,7 +5964,7 @@ function assembleWbCardPrompt(productImageCount) {
     ? chars.map(c => `  \u2022 ${c}`).join('\n')
     : '  \u2022 Natural materials\n  \u2022 Premium quality\n  \u2022 Guaranteed';
   const textOverlays = skGetTextOverlaysForPrompt();
-  const inspoPresetCount = getInspoPresetUrls().length;
+  const inspoPresetCount = getInspoPresetSources().length;
   const inspoUploadCount = uploadedInspoImages.length;
   const totalInspoCount = inspoPresetCount + inspoUploadCount;
   const prodCount = productImageCount || 0;
@@ -6013,22 +6092,9 @@ async function submitToolsRequest(task) {
   const body = { model_id: modelId, prompt: task.prompt };
 
   const imageUrls = await resolveUploadItemUrls(uploadedToolsImages, 'tools-ref', task);
-  const presetUrls = getInspoPresetUrls();
-  for (const pUrl of presetUrls) {
-    try {
-      if (canPassThroughRemoteUrl(pUrl)) {
-        imageUrls.push(pUrl.trim());
-        continue;
-      }
-      const resp = await fetch(pUrl);
-      if (!resp.ok) continue;
-      const blob = await resp.blob();
-      const ext = pUrl.split('.').pop().split('?')[0] || 'jpg';
-      const file = new File([blob], `preset-${Date.now()}.${ext}`, { type: blob.type || 'image/jpeg' });
-      const u = await uploadFileToFal(file, 'tools-inspo-preset', task);
-      if (u) imageUrls.push(u);
-    } catch (e) { console.warn('Preset upload failed:', pUrl, e); }
-  }
+  const presetSources = getInspoPresetSources();
+  const presetUrls = await resolveUploadItemUrls(presetSources, 'tools-inspo-preset', task);
+  imageUrls.push(...presetUrls);
   for (const f of uploadedInspoImages) {
     const u = await uploadFileToFal(f, 'tools-inspo', task);
     if (u) imageUrls.push(u);
@@ -9831,7 +9897,7 @@ async function getLegacyMigrationPayload() {
 }
 
 async function clearLegacyMigrationData(markerUserId) {
-  ['nano_history', 'nano_tasks', TITLE_PRESETS_KEY, CHAR_PRESETS_KEY, INSPO_HIDDEN_KEY, INSPO_NAMES_KEY, INSPO_STATE_META_KEY].forEach((key) => localStorage.removeItem(key));
+  ['nano_history', 'nano_tasks', TITLE_PRESETS_KEY, CHAR_PRESETS_KEY, INSPO_HIDDEN_KEY, INSPO_NAMES_KEY, INSPO_STATE_META_KEY, INSPO_SELECTED_KEY].forEach((key) => localStorage.removeItem(key));
   try {
     await _inspoIdbReplaceAllForOwner('__guest__', []);
   } catch (error) {
@@ -9862,6 +9928,7 @@ async function applyDesignPresetState(state) {
       ownerKey,
     })).filter(Boolean);
     inspoSaveLocalMeta({ markDirty: false });
+    restoreInspoSelectedPresets();
   });
   try {
     await _inspoIdbReplaceAllForOwner(ownerKey, _wizCustomPresets);
@@ -9919,7 +9986,14 @@ function replaceTasksFromScopedStorage() {
 }
 
 function setAccountStorageScope(userId, options = {}) {
+  const previousScope = getActiveAccountStorageScope();
   setActiveAccountStorageScope(userId);
+  const nextScope = getActiveAccountStorageScope();
+  if (previousScope !== nextScope) {
+    wizLoadInspoPresets().catch((error) => {
+      console.warn('Failed to refresh inspiration presets for storage scope', error);
+    });
+  }
   if (options.loadHistory) replaceHistoryFromAccount(loadStoredArray('nano_history'));
   if (options.loadTasks !== false) replaceTasksFromScopedStorage();
 }
@@ -9998,6 +10072,7 @@ async function clearSignedInAccountData() {
     _wizHiddenBuiltins = new Set();
     _wizPresetNameOverrides = {};
     _wizCustomPresets = [];
+    _wizSelectedPresets = new Set();
   });
   wizRenderInspoPresets();
   history = [];

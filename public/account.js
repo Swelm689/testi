@@ -800,6 +800,70 @@ function normalizeDesignPresetState(state) {
   };
 }
 
+function mergeDesignPresetCustomPreset(localPreset, remotePreset) {
+  const local = localPreset && typeof localPreset === 'object' ? localPreset : {};
+  const remote = remotePreset && typeof remotePreset === 'object' ? remotePreset : {};
+  return {
+    ...remote,
+    ...local,
+    id: local.id || remote.id || null,
+    name: local.name || remote.name || 'Custom Preset',
+    src: local.src || remote.src || local.dataUrl || remote.dataUrl || null,
+    dataUrl: local.dataUrl || remote.dataUrl || null,
+    storagePath: local.storagePath || remote.storagePath || null,
+    createdAt: local.createdAt || remote.createdAt || null,
+  };
+}
+
+function mergeDesignPresetState(localState, remoteState) {
+  const local = normalizeDesignPresetState(localState);
+  const remote = normalizeDesignPresetState(remoteState);
+  const hiddenBuiltins = Array.from(new Set([...(remote.hiddenBuiltins || []), ...(local.hiddenBuiltins || [])]));
+  const nameOverrides = { ...(remote.nameOverrides || {}), ...(local.nameOverrides || {}) };
+  const customPresetMap = new Map();
+
+  (remote.customPresets || []).forEach((preset) => {
+    if (!preset || !preset.id) return;
+    customPresetMap.set(String(preset.id), mergeDesignPresetCustomPreset(null, preset));
+  });
+  (local.customPresets || []).forEach((preset) => {
+    if (!preset || !preset.id) return;
+    const id = String(preset.id);
+    customPresetMap.set(id, mergeDesignPresetCustomPreset(preset, customPresetMap.get(id) || null));
+  });
+
+  return {
+    hiddenBuiltins,
+    nameOverrides,
+    customPresets: Array.from(customPresetMap.values()).filter((preset) => preset && preset.id),
+  };
+}
+
+function stableDesignPresetState(state) {
+  const next = normalizeDesignPresetState(state);
+  const hiddenBuiltins = Array.from(new Set(next.hiddenBuiltins || [])).sort();
+  const nameOverrides = Object.keys(next.nameOverrides || {}).sort().reduce((acc, key) => {
+    acc[key] = next.nameOverrides[key];
+    return acc;
+  }, {});
+  const customPresets = (next.customPresets || [])
+    .filter((preset) => preset && preset.id)
+    .map((preset) => ({
+      id: String(preset.id),
+      name: preset.name || 'Custom Preset',
+      src: preset.src || null,
+      dataUrl: preset.dataUrl || null,
+      storagePath: preset.storagePath || null,
+      createdAt: preset.createdAt || null,
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return { hiddenBuiltins, nameOverrides, customPresets };
+}
+
+function designPresetStatesEqual(left, right) {
+  return JSON.stringify(stableDesignPresetState(left)) === JSON.stringify(stableDesignPresetState(right));
+}
+
 function shouldPreferLocalDesignPresetState(localState, remoteState) {
   const localMeta = localState && localState.meta ? localState.meta : {};
   if (localMeta.dirty) return true;
@@ -1177,8 +1241,9 @@ async function bootstrapForSession(session, options = {}) {
     try {
       const localAccountData = await window.NanoApp.getScopedLocalAccountData(state.user.id, { includeHistory: false });
       const localDesignState = localAccountData && localAccountData.designPresetState ? localAccountData.designPresetState : null;
-      if (shouldPreferLocalDesignPresetState(localDesignState, data && data.designPresetState)) {
-        data.designPresetState = normalizeDesignPresetState(localDesignState);
+      const mergedDesignState = mergeDesignPresetState(localDesignState, data && data.designPresetState);
+      if (shouldPreferLocalDesignPresetState(localDesignState, data && data.designPresetState) || !designPresetStatesEqual(mergedDesignState, data && data.designPresetState)) {
+        data.designPresetState = mergedDesignState;
         shouldResyncLocalDesignState = true;
       }
     } catch (error) {
@@ -1261,6 +1326,7 @@ async function syncTextPresetsNow() {
 async function syncDesignPresetsNow() {
   if (!state.bootstrapComplete || !state.user || !window.NanoApp) return;
   const rawDesignPresetState = window.NanoApp.getDesignPresetStateSnapshot();
+  let skippedCustomPresetCount = 0;
   const designPresetState = {
     hiddenBuiltins: Array.isArray(rawDesignPresetState && rawDesignPresetState.hiddenBuiltins) ? rawDesignPresetState.hiddenBuiltins : [],
     nameOverrides: rawDesignPresetState && typeof rawDesignPresetState.nameOverrides === 'object' ? rawDesignPresetState.nameOverrides : {},
@@ -1270,6 +1336,7 @@ async function syncDesignPresetsNow() {
         const safeSrc = (typeof preset.src === 'string' && preset.src && !/^data:/i.test(preset.src)) ? preset.src : null;
         const safeDataUrl = (typeof preset.dataUrl === 'string' && preset.dataUrl && preset.dataUrl.length <= 180000) ? preset.dataUrl : null;
         if (!preset.storagePath && !safeSrc && !safeDataUrl) {
+          skippedCustomPresetCount += 1;
           return null;
         }
         return {
@@ -1284,7 +1351,7 @@ async function syncDesignPresetsNow() {
     method: 'POST',
     body: { action: 'save-design-presets', designPresetState },
   });
-  if (typeof window.NanoApp.markDesignPresetSyncClean === 'function') {
+  if (skippedCustomPresetCount === 0 && typeof window.NanoApp.markDesignPresetSyncClean === 'function') {
     window.NanoApp.markDesignPresetSyncClean(state.user.id);
   }
   state.summary = mergeSummaryCounts(state.summary, window.NanoApp.getAccountSummarySnapshot());
