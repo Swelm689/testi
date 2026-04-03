@@ -319,16 +319,38 @@ const TOPAZ_FACE_MODELS = new Set(['Standard V2', 'Recovery V2']);
 const TOPAZ_SHARPEN_DENOISE_MODELS = new Set(['Standard V2', 'Low Resolution V2', 'CGI', 'High Fidelity V2', 'Text Refine', 'Redefine']);
 const TOPAZ_FIX_COMPRESSION_MODELS = new Set(['Standard V2', 'Low Resolution V2', 'High Fidelity V2', 'Text Refine']);
 const TOPAZ_MODEL_NOTES = {
-  'Standard V2': 'Balanced upscale with subject detection, face enhancement, sharpening, denoise, and compression cleanup.',
-  'Low Resolution V2': 'Best for smaller source files. Supports sharpen, denoise, and fix compression.',
-  'CGI': 'Optimized for renders and synthetic imagery with sharpen and denoise controls.',
-  'High Fidelity V2': 'Preserves realism while allowing sharpen, denoise, and compression cleanup.',
-  'Text Refine': 'Built for text-heavy images. Supports sharpen, denoise, fix compression, and enhancement strength.',
-  'Recovery': 'Simple restoration mode with no extra tuning beyond upscale, crop, and output format.',
-  'Redefine': 'Generative upscale mode with sharpen, denoise, creativity, texture, prompt, and auto prompt.',
-  'Recovery V2': 'Restoration mode with subject detection, face enhancement, and detail recovery.',
-  'Standard MAX': 'High-capacity upscale mode with core controls only.',
-  'Wonder': 'Stylized upscale mode with core controls only.',
+  'Standard V2': 'tools_enhancer_note_standard_v2',
+  'Low Resolution V2': 'tools_enhancer_note_low_resolution_v2',
+  'CGI': 'tools_enhancer_note_cgi',
+  'High Fidelity V2': 'tools_enhancer_note_high_fidelity_v2',
+  'Text Refine': 'tools_enhancer_note_text_refine',
+  'Recovery': 'tools_enhancer_note_recovery',
+  'Redefine': 'tools_enhancer_note_redefine',
+  'Recovery V2': 'tools_enhancer_note_recovery_v2',
+  'Standard MAX': 'tools_enhancer_note_standard_max',
+  'Wonder': 'tools_enhancer_note_wonder',
+};
+const TOPAZ_HELP_TEXT = {
+  sourceImage: 'tools_help_source_image',
+  model: 'tools_help_model',
+  upscale_factor: 'tools_help_upscale_factor',
+  output_format: 'tools_help_output_format',
+  crop_to_fill: 'tools_help_crop_to_fill',
+  subject_detection: 'tools_help_subject_detection',
+  face_enhancement: 'tools_help_face_enhancement',
+  face_enhancement_strength: 'tools_help_face_strength',
+  face_enhancement_creativity: 'tools_help_face_creativity',
+  sharpen: 'tools_help_sharpen',
+  denoise: 'tools_help_denoise',
+  fix_compression: 'tools_help_fix_compression',
+  strength: 'tools_help_strength',
+  detail: 'tools_help_detail',
+  creativity: 'tools_help_creativity',
+  texture: 'tools_help_texture',
+  autoprompt: 'tools_help_autoprompt',
+  prompt: 'tools_help_prompt',
+  cutout_output_format: 'tools_help_cutout_output_format',
+  cutout_sync_mode: 'tools_help_cutout_sync_mode',
 };
 const TOPAZ_RANGE_CONTROLS = [
   { inputId: 'toolsEnhancerUpscaleFactor', rangeId: 'toolsEnhancerUpscaleFactorRange', min: 1, max: 4, step: 0.1, precision: 1 },
@@ -342,6 +364,82 @@ const TOPAZ_RANGE_CONTROLS = [
   { inputId: 'toolsEnhancerCreativity', rangeId: 'toolsEnhancerCreativityRange', min: 1, max: 6, step: 1, precision: 0 },
   { inputId: 'toolsEnhancerTexture', rangeId: 'toolsEnhancerTextureRange', min: 1, max: 5, step: 1, precision: 0 },
 ];
+const TOPAZ_HELP_TARGETS = [
+  { key: 'sourceImage', selector: '#toolsEnhancerWorkspace .group-label', placement: 'group' },
+  { key: 'model', selector: '#toolsEnhancerModelField > label' },
+  { key: 'upscale_factor', selector: '#toolsEnhancerUpscaleField > label' },
+  { key: 'output_format', selector: '#toolsEnhancerOutputFormatField > label' },
+  { key: 'crop_to_fill', selector: '#toolsEnhancerCropToFill', placement: 'toggle' },
+  { key: 'subject_detection', selector: '#toolsEnhancerSubjectField > label' },
+  { key: 'face_enhancement', selector: '#toolsEnhancerFaceEnhancement', placement: 'toggle' },
+  { key: 'face_enhancement_strength', selector: '#toolsEnhancerFaceStrengthField > label' },
+  { key: 'face_enhancement_creativity', selector: '#toolsEnhancerFaceCreativityField > label' },
+  { key: 'sharpen', selector: '#toolsEnhancerSharpenField > label' },
+  { key: 'denoise', selector: '#toolsEnhancerDenoiseField > label' },
+  { key: 'fix_compression', selector: '#toolsEnhancerFixCompressionField > label' },
+  { key: 'strength', selector: '#toolsEnhancerStrengthField > label' },
+  { key: 'detail', selector: '#toolsEnhancerDetailField > label' },
+  { key: 'creativity', selector: '#toolsEnhancerCreativityField > label' },
+  { key: 'texture', selector: '#toolsEnhancerTextureField > label' },
+  { key: 'autoprompt', selector: '#toolsEnhancerAutoprompt', placement: 'toggle' },
+  { key: 'prompt', selector: '#toolsEnhancerPromptField > label' },
+  { key: 'sourceImage', selector: '#toolsBgRemovalWorkspace .group-label', placement: 'group' },
+  { key: 'cutout_output_format', selector: '#toolsBgOutputFormatField > label' },
+  { key: 'cutout_sync_mode', selector: '#toolsBgSyncModeField > label' },
+];
+let activeToolsHelpButton = null;
+let toolsHelpPopoverEl = null;
+let toolsHelpDelegationBound = false;
+
+function toolsUiText(key, fallback = '') {
+  try {
+    if (window.I18N && typeof window.I18N.t === 'function') return window.I18N.t(key);
+  } catch (_) {}
+  return fallback || key;
+}
+
+function toolsHelpAria(labelText) {
+  return toolsUiText('tools_help_aria', '{label} help').replace('{label}', labelText || toolsUiText('tools_help_title', 'Setting Help'));
+}
+
+function resolveToolsHelpButtonTitle(buttonEl) {
+  if (!buttonEl) return toolsUiText('tools_help_title', 'Setting Help');
+  const toggleCopy = buttonEl.closest('.tools-toggle-copy');
+  if (toggleCopy) {
+    const textSpan = toggleCopy.querySelector('span[data-i18n], span');
+    const text = (textSpan ? textSpan.textContent : '').trim();
+    if (text) return text;
+  }
+  const head = buttonEl.closest('.tools-setting-head, .group-label');
+  if (head) {
+    const textSpan = head.querySelector('span[data-i18n], span');
+    const text = (textSpan ? textSpan.textContent : '').trim();
+    if (text) return text;
+    const plainText = Array.from(head.childNodes || [])
+      .filter((node) => !(node.nodeType === 1 && node.classList && node.classList.contains('tools-help-btn')))
+      .map((node) => node.textContent || '')
+      .join(' ')
+      .trim();
+    if (plainText) return plainText;
+  }
+  return buttonEl.title || toolsUiText('tools_help_title', 'Setting Help');
+}
+
+function bindGlobalToolsHelpInteractions() {
+  if (toolsHelpDelegationBound) return;
+  toolsHelpDelegationBound = true;
+  document.addEventListener('click', (event) => {
+    const buttonEl = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('.tools-help-btn')
+      : null;
+    if (!buttonEl) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const key = buttonEl.dataset.helpKey || '';
+    if (!key) return;
+    openToolsHelpPopover(buttonEl, key, resolveToolsHelpButtonTitle(buttonEl));
+  }, true);
+}
 
 function isRemoteAssetItem(item) {
   return !!(item && typeof item === 'object' && item.__remoteAsset && typeof item.url === 'string' && item.url);
@@ -4769,22 +4867,23 @@ function refreshToolsUtilitySourceUi() {
   const config = MANAGED_UPLOADS.toolsUtilityImageInput;
   const source = getToolsUtilitySource();
   const labelText = getManagedUploadLabel(config, getManagedUploadFiles(config));
+  const idleLabel = toolsUiText('tools_utility_idle_label', 'Click or drag a source image');
   const hintText = source
-    ? 'Shared source image is ready for every utility tool.'
-    : 'PNG, JPG, WebP, HEIC';
+    ? toolsUiText('tools_utility_ready_hint', 'Shared source image is ready for every utility tool.')
+    : toolsUiText('tools_utility_idle_hint', 'PNG, JPG, WebP, HEIC');
 
   const enhancerLabel = qs('toolsUtilityImageLabel');
-  if (enhancerLabel) enhancerLabel.textContent = labelText || 'Click or drag a source image';
+  if (enhancerLabel) enhancerLabel.textContent = labelText || idleLabel;
   const enhancerHint = qs('toolsUtilityImageHint');
   if (enhancerHint) enhancerHint.textContent = hintText;
 
   const bgLabel = qs('toolsBgRemovalImageLabel');
-  if (bgLabel) bgLabel.textContent = source ? 'Source image ready for cutout' : 'Click or drag a source image';
+  if (bgLabel) bgLabel.textContent = source ? toolsUiText('tools_cutout_ready_label', 'Source image ready for cutout') : idleLabel;
   const bgHint = qs('toolsBgRemovalImageHint');
   if (bgHint) {
     bgHint.textContent = source
-      ? 'You can switch between Enhancer and Cutout without re-uploading.'
-      : 'Drop once, then switch between utility tools freely';
+      ? toolsUiText('tools_cutout_ready_hint', 'You can switch between Enhancer and Cutout without re-uploading.')
+      : toolsUiText('tools_cutout_idle_hint', 'Drop once, then switch between utility tools freely');
   }
 
   ['toolsUtilityImageDropzone', 'toolsBgRemovalDropzone'].forEach((zoneId) => {
@@ -4856,6 +4955,161 @@ function initToolsEnhancerRanges() {
   });
 }
 
+function closeToolsHelpPopover() {
+  if (activeToolsHelpButton) {
+    activeToolsHelpButton.setAttribute('aria-expanded', 'false');
+    activeToolsHelpButton = null;
+  }
+  if (toolsHelpPopoverEl) {
+    toolsHelpPopoverEl.classList.remove('is-open');
+  }
+}
+
+function ensureToolsHelpPopover() {
+  bindGlobalToolsHelpInteractions();
+  if (toolsHelpPopoverEl) return toolsHelpPopoverEl;
+  const pop = document.createElement('div');
+  pop.className = 'tools-help-popover';
+  pop.innerHTML = `<div class="tools-help-popover-title">${toolsUiText('tools_help_title', 'Setting Help')}</div><div class="tools-help-popover-copy"></div>`;
+  document.body.appendChild(pop);
+  toolsHelpPopoverEl = pop;
+
+  document.addEventListener('click', (event) => {
+    if (!toolsHelpPopoverEl || !toolsHelpPopoverEl.classList.contains('is-open')) return;
+    const target = event.target;
+    if (toolsHelpPopoverEl.contains(target)) return;
+    if (activeToolsHelpButton && activeToolsHelpButton.contains(target)) return;
+    closeToolsHelpPopover();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeToolsHelpPopover();
+  });
+  window.addEventListener('resize', closeToolsHelpPopover);
+  window.addEventListener('scroll', closeToolsHelpPopover, true);
+
+  return pop;
+}
+
+function positionToolsHelpPopover(anchorEl) {
+  if (!anchorEl || !toolsHelpPopoverEl) return;
+  const rect = anchorEl.getBoundingClientRect();
+  const popRect = toolsHelpPopoverEl.getBoundingClientRect();
+  const margin = 10;
+  let left = rect.left + rect.width / 2 - popRect.width / 2;
+  left = Math.max(margin, Math.min(left, window.innerWidth - popRect.width - margin));
+
+  let top = rect.bottom + 10;
+  if (top + popRect.height > window.innerHeight - margin) {
+    top = rect.top - popRect.height - 10;
+  }
+  top = Math.max(margin, top);
+
+  toolsHelpPopoverEl.style.left = `${left}px`;
+  toolsHelpPopoverEl.style.top = `${top}px`;
+}
+
+function openToolsHelpPopover(buttonEl, key, titleText) {
+  const pop = ensureToolsHelpPopover();
+  const copyEl = pop.querySelector('.tools-help-popover-copy');
+  const titleEl = pop.querySelector('.tools-help-popover-title');
+  if (!copyEl || !titleEl) return;
+
+  if (activeToolsHelpButton === buttonEl && pop.classList.contains('is-open')) {
+    closeToolsHelpPopover();
+    return;
+  }
+
+  if (activeToolsHelpButton) activeToolsHelpButton.setAttribute('aria-expanded', 'false');
+  activeToolsHelpButton = buttonEl;
+  activeToolsHelpButton.setAttribute('aria-expanded', 'true');
+  titleEl.textContent = titleText || toolsUiText('tools_help_title', 'Setting Help');
+  copyEl.textContent = toolsUiText(TOPAZ_HELP_TEXT[key], toolsUiText('tools_help_fallback', 'No description is available for this setting yet.'));
+  pop.classList.add('is-open');
+  requestAnimationFrame(() => positionToolsHelpPopover(buttonEl));
+}
+
+function bindToolsHelpButton(buttonEl, targetSpec, resolveTitleText, fallbackTitle = '') {
+  if (!buttonEl || !targetSpec) return;
+  const nextTitle = typeof resolveTitleText === 'function' ? resolveTitleText() : fallbackTitle;
+  buttonEl.dataset.helpKey = targetSpec.key;
+  buttonEl._resolveToolsHelpTitle = resolveTitleText;
+  buttonEl.setAttribute('aria-label', toolsHelpAria(nextTitle));
+  buttonEl.setAttribute('aria-expanded', buttonEl.getAttribute('aria-expanded') || 'false');
+  buttonEl.title = nextTitle;
+  if (buttonEl._toolsHelpBound) return;
+  buttonEl._toolsHelpBound = true;
+  buttonEl.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const title = typeof buttonEl._resolveToolsHelpTitle === 'function' ? buttonEl._resolveToolsHelpTitle() : fallbackTitle;
+    openToolsHelpPopover(buttonEl, targetSpec.key, title);
+  });
+}
+
+function attachTopazHelpButton(targetSpec) {
+  if (!targetSpec || !targetSpec.selector) return;
+  const baseTarget = qs(targetSpec.selector);
+  if (!baseTarget) return;
+
+  let mountEl = baseTarget;
+  let titleText = '';
+
+  if (targetSpec.placement === 'toggle') {
+    const toggleLabel = baseTarget.closest('label.tools-utility-toggle');
+    if (!toggleLabel) return;
+    let copyWrap = toggleLabel.querySelector('.tools-toggle-copy');
+    const labelSpan = toggleLabel.querySelector('.tools-toggle-copy > span[data-i18n], .tools-toggle-copy > span, span[data-i18n], span');
+    if (!copyWrap && labelSpan) {
+      copyWrap = document.createElement('span');
+      copyWrap.className = 'tools-toggle-copy';
+      labelSpan.parentNode.insertBefore(copyWrap, labelSpan);
+      copyWrap.appendChild(labelSpan);
+    }
+    mountEl = copyWrap || toggleLabel;
+    titleText = labelSpan ? labelSpan.textContent.trim() : toolsUiText('tools_help_title', 'Setting Help');
+  } else {
+    mountEl = baseTarget;
+    titleText = baseTarget.textContent.trim() || toolsUiText('tools_help_title', 'Setting Help');
+    mountEl.classList.add('tools-setting-head');
+  }
+
+  if (!mountEl) return;
+
+  const resolveTitleText = () => {
+    if (targetSpec.placement === 'toggle') {
+      const labelSpan = baseTarget.closest('label.tools-utility-toggle')?.querySelector('.tools-toggle-copy > span[data-i18n], .tools-toggle-copy > span, span[data-i18n], span');
+      return (labelSpan ? labelSpan.textContent : '').trim() || toolsUiText('tools_help_title', 'Setting Help');
+    }
+    const labelSpan = baseTarget.querySelector('span[data-i18n], span');
+    if (labelSpan) return (labelSpan.textContent || '').trim() || toolsUiText('tools_help_title', 'Setting Help');
+    const plainText = Array.from(baseTarget.childNodes || [])
+      .filter((node) => !(node.nodeType === 1 && node.classList && node.classList.contains('tools-help-btn')))
+      .map((node) => node.textContent || '')
+      .join(' ')
+      .trim();
+    return plainText || toolsUiText('tools_help_title', 'Setting Help');
+  };
+
+  const existingBtn = mountEl.querySelector(`.tools-help-btn[data-help-key="${targetSpec.key}"]`);
+  if (existingBtn) {
+    bindToolsHelpButton(existingBtn, targetSpec, resolveTitleText, titleText);
+    return;
+  }
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tools-help-btn';
+  btn.textContent = '?';
+  bindToolsHelpButton(btn, targetSpec, resolveTitleText, titleText);
+
+  mountEl.appendChild(btn);
+}
+
+function initTopazHelpButtons() {
+  bindGlobalToolsHelpInteractions();
+  TOPAZ_HELP_TARGETS.forEach(attachTopazHelpButton);
+}
+
 function updateToolsEnhancerUi() {
   const model = qs('toolsEnhancerModel') ? qs('toolsEnhancerModel').value : 'Standard V2';
   const showSubject = TOPAZ_SUBJECT_MODELS.has(model);
@@ -4888,10 +5142,16 @@ function updateToolsEnhancerUi() {
 
   const noteEl = qs('toolsEnhancerModelNote');
   if (noteEl) {
-    const note = TOPAZ_MODEL_NOTES[model] || 'Only settings supported by the selected Topaz model are shown below.';
-    noteEl.textContent = note;
+    const noteKey = TOPAZ_MODEL_NOTES[model] || 'tools_enhancer_note_fallback';
+    noteEl.textContent = toolsUiText(noteKey, 'Only settings supported by the selected Topaz model are shown below.');
   }
 
+  if (activeToolsHelpButton) {
+    const hiddenField = activeToolsHelpButton.closest('.field, .tools-utility-toggle, .group-label');
+    if (!document.body.contains(activeToolsHelpButton) || (hiddenField && hiddenField.offsetParent === null)) {
+      closeToolsHelpPopover();
+    }
+  }
   TOPAZ_RANGE_CONTROLS.forEach((meta) => syncEnhancerRangeControl(meta, 'input', false));
 }
 
@@ -4923,6 +5183,8 @@ function switchToolsTool(tool, options = {}) {
     el.style.display = isActive ? 'block' : 'none';
   });
 
+  initTopazHelpButtons();
+
   if (currentMode === 'tools') {
     if (currentToolsTool === 'card-studio') enterWizFullscreen();
     else exitWizFullscreen();
@@ -4942,6 +5204,7 @@ window.switchToolsTool = switchToolsTool;
 function initToolsUtilityControls() {
   const utilityInput = qs('toolsUtilityImageInput');
   if (!utilityInput || utilityInput._toolsUtilityBound) {
+    initTopazHelpButtons();
     initToolsEnhancerRanges();
     refreshToolsUtilitySourceUi();
     updateToolsEnhancerUi();
@@ -4964,6 +5227,7 @@ function initToolsUtilityControls() {
     saveAppState();
   });
 
+  initTopazHelpButtons();
   initToolsEnhancerRanges();
   refreshToolsUtilitySourceUi();
   updateToolsEnhancerUi();
@@ -10151,6 +10415,8 @@ function hookPersistence() {
 }
 
 function refreshLocalizedDynamicUi() {
+  closeToolsHelpPopover();
+  initTopazHelpButtons();
   refreshAllManagedUploads();
   refreshToolsUtilitySourceUi();
   updateToolsEnhancerUi();

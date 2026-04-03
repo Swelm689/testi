@@ -178,6 +178,10 @@
     kling3KeepAudio:   { true:'opt_on', false:'opt_off' },
     kling3MotionOrientation:{ image:'opt_image', video:'opt_video' },
     kling3KeepOriginalSound:{ true:'opt_on', false:'opt_off' },
+    toolsEnhancerOutputFormat:{ jpeg:'tools_opt_jpeg', png:'tools_opt_png' },
+    toolsEnhancerSubjectDetection:{ All:'tools_opt_subject_all', Foreground:'tools_opt_subject_foreground', Background:'tools_opt_subject_background' },
+    toolsBgOutputFormat:{ rgba:'tools_cutout_opt_rgba', alpha:'tools_cutout_opt_alpha' },
+    toolsBgSyncMode:{ false:'tools_cutout_opt_stored_url', true:'tools_cutout_opt_data_url' },
   };
 
   /* ── MAP: upload item label next to upload-area in 3D mode ─────────────
@@ -375,4 +379,3 @@
   window.toggleLangPicker = () => I18N.togglePicker();
 
 })();
-

@@ -3455,6 +3455,16 @@ model-viewer {
     margin-bottom: 0.35rem;
 }
 
+.tools-workspace-utility .field > label,
+.tools-workspace-utility .group-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.32rem;
+    width: fit-content;
+    max-width: 100%;
+    flex-wrap: wrap;
+}
+
 /* ===== UTILITY UPLOAD DROP ZONE ===== */
 .tools-utility-drop {
     min-height: 155px;
@@ -3542,6 +3552,92 @@ model-viewer {
     line-height: 1.45;
 }
 
+.tools-setting-head,
+.tools-workspace-utility .group-label.tools-setting-head {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.tools-utility-toggle .tools-toggle-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.tools-help-btn {
+    width: 16px;
+    height: 16px;
+    border: 1px solid rgba(212,145,90,0.32);
+    border-radius: 999px;
+    background: rgba(212,145,90,0.14);
+    color: var(--accent-bright);
+    font-size: 0.58rem;
+    font-weight: 700;
+    font-family: var(--font-body);
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: var(--transition-fast);
+    flex-shrink: 0;
+    letter-spacing: 0;
+    padding: 0;
+    margin-left: 0.08rem;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.tools-help-btn:hover,
+.tools-help-btn:focus-visible,
+.tools-help-btn[aria-expanded="true"] {
+    border-color: rgba(212,145,90,0.4);
+    background: rgba(212,145,90,0.12);
+    box-shadow: 0 0 0 3px rgba(212,145,90,0.12);
+    outline: none;
+}
+
+.tools-help-popover {
+    position: fixed;
+    z-index: 1600;
+    width: min(320px, calc(100vw - 24px));
+    padding: 0.8rem 0.9rem;
+    border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.08);
+    background:
+        radial-gradient(circle at top, rgba(212,145,90,0.1), transparent 55%),
+        linear-gradient(180deg, rgba(28, 25, 32, 0.98), rgba(15, 15, 19, 0.98));
+    box-shadow: 0 22px 50px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.03);
+    color: var(--text-secondary);
+    font-size: 0.74rem;
+    line-height: 1.5;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+    transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.tools-help-popover.is-open {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+
+.tools-help-popover-title {
+    margin-bottom: 0.35rem;
+    color: var(--accent-bright);
+    font-size: 0.69rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.tools-help-popover-copy {
+    color: var(--text-secondary);
+}
+
 /* ===== UTILITY TOGGLE ROW ===== */
 .tools-utility-toggle {
     display: flex;
@@ -3623,6 +3719,17 @@ model-viewer {
     .tools-range-field {
         grid-template-columns: 1fr 72px;
         gap: 0.55rem;
+    }
+
+    .tools-help-popover {
+        width: min(340px, calc(100vw - 20px));
+        font-size: 0.72rem;
+    }
+
+    .tools-help-btn {
+        width: 18px;
+        height: 18px;
+        font-size: 0.62rem;
     }
 
     .tools-workspace-utility .tools-utility-textarea {
@@ -6144,8 +6251,6 @@ body.wiz-fullscreen .generate-btn {
     color: var(--text-muted);
     padding-left: 0.75rem;
 }
-
-
 
 
 
