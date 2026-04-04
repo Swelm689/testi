@@ -120,6 +120,7 @@ function normalizeHistoryItemForRuntime(item) {
   const type = next.type || 'image';
   const originalUrl = meta && meta.originalUrl ? String(meta.originalUrl) : '';
   const originalDownloadUrl = meta && meta.originalDownloadUrl ? String(meta.originalDownloadUrl) : '';
+  const originalResidualUrl = meta && meta.originalResidualUrl ? String(meta.originalResidualUrl) : '';
   const previewUrl = meta && meta.previewUrl ? String(meta.previewUrl) : '';
   const fallbackThumb = meta && meta.thumbnail_fallback ? String(meta.thumbnail_fallback) : '';
 
@@ -135,6 +136,16 @@ function normalizeHistoryItemForRuntime(item) {
     if (!next.thumbnailUrl) {
       const thumbCandidate = fallbackThumb || (previewUrl && previewUrl !== next.url ? previewUrl : '');
       if (thumbCandidate && thumbCandidate !== next.url) next.thumbnailUrl = thumbCandidate;
+    }
+  } else if (type === 'audio') {
+    if ((!next.url || /^data:image\//i.test(String(next.url))) && (originalUrl || originalDownloadUrl)) {
+      next.url = originalUrl || originalDownloadUrl;
+    }
+    if (!next.residualUrl && originalResidualUrl) {
+      next.residualUrl = originalResidualUrl;
+    }
+    if (!next.thumbnailUrl) {
+      next.thumbnailUrl = fallbackThumb || previewUrl || createAudioPlaceholderDataUrl('AUDIO');
     }
   } else if (type === 'image') {
     if (originalUrl && (!next.url || (fallbackThumb && String(next.url) === fallbackThumb))) {
@@ -254,6 +265,7 @@ const HISTORY_FILTERS = [
   { id: 'all', types: null },
   { id: 'image', types: ['image'] },
   { id: 'video', types: ['video'] },
+  { id: 'audio', types: ['audio'] },
   { id: '3d', types: ['3d'] },
 ];
 let historyViewState = { type: HISTORY_FILTERS[0].id, query: '' };
@@ -295,6 +307,7 @@ let uploadedKling3RefImages = [];
 // Tools mode state
 let uploadedToolsImages = [];
 let uploadedToolsUtilityImage = null;
+let uploadedToolsUtilityAudio = null;
 const managedUploadRemoteState = Object.create(null);
 let toolsCharsCount = 0;
 let currentToolsTool = 'card-studio';
@@ -308,11 +321,16 @@ let kling3LastTabByFamily = { v3: 'v3-text-to-video', o3: 'o3-text-to-video' };
 let kling3ControlsInitialized = false;
 let ltx23SelectedModelByFamily = {};
 
-const TOOLS_TOOL_IDS = new Set(['card-studio', 'enhancer', 'background-removal']);
+const TOOLS_TOOL_IDS = new Set(['card-studio', 'enhancer', 'background-removal', 'sam-audio']);
 const TOOLS_TOOL_MODEL_IDS = {
   'card-studio': null,
   enhancer: 'fal-ai/topaz/upscale/image',
   'background-removal': 'pixelcut/background-removal',
+  'sam-audio': 'fal-ai/sam-audio/separate',
+};
+const SAM_AUDIO_MODEL_NOTES = {
+  'fal-ai/sam-audio/separate': 'tools_sam_audio_note_separate',
+  'fal-ai/sam-audio/span-separate': 'tools_sam_audio_note_span',
 };
 const TOPAZ_SUBJECT_MODELS = new Set(['Standard V2', 'Recovery V2']);
 const TOPAZ_FACE_MODELS = new Set(['Standard V2', 'Recovery V2']);
@@ -351,6 +369,18 @@ const TOPAZ_HELP_TEXT = {
   prompt: 'tools_help_prompt',
   cutout_output_format: 'tools_help_cutout_output_format',
   cutout_sync_mode: 'tools_help_cutout_sync_mode',
+  sourceAudio: 'tools_help_source_audio',
+  sam_audio_model: 'tools_help_sam_audio_model',
+  sam_audio_prompt: 'tools_help_sam_audio_prompt',
+  sam_audio_predict_spans: 'tools_help_sam_audio_predict_spans',
+  sam_audio_spans: 'tools_help_sam_audio_spans',
+  sam_audio_reranking_candidates: 'tools_help_sam_audio_reranking_candidates',
+  sam_audio_acceleration: 'tools_help_sam_audio_acceleration',
+  sam_audio_max_chunk_duration: 'tools_help_sam_audio_max_chunk_duration',
+  sam_audio_chunk_overlap: 'tools_help_sam_audio_chunk_overlap',
+  sam_audio_use_sound_activity_ranking: 'tools_help_sam_audio_sound_activity_ranking',
+  sam_audio_trim_to_span: 'tools_help_sam_audio_trim_to_span',
+  sam_audio_output_format: 'tools_help_sam_audio_output_format',
 };
 const TOPAZ_RANGE_CONTROLS = [
   { inputId: 'toolsEnhancerUpscaleFactor', rangeId: 'toolsEnhancerUpscaleFactorRange', min: 1, max: 4, step: 0.1, precision: 1 },
@@ -363,6 +393,9 @@ const TOPAZ_RANGE_CONTROLS = [
   { inputId: 'toolsEnhancerDetail', rangeId: 'toolsEnhancerDetailRange', min: 0, max: 1, step: 0.05, precision: 2 },
   { inputId: 'toolsEnhancerCreativity', rangeId: 'toolsEnhancerCreativityRange', min: 1, max: 6, step: 1, precision: 0 },
   { inputId: 'toolsEnhancerTexture', rangeId: 'toolsEnhancerTextureRange', min: 1, max: 5, step: 1, precision: 0 },
+  { inputId: 'toolsSamAudioRerankingCandidates', rangeId: 'toolsSamAudioRerankingCandidatesRange', min: 1, max: 7, step: 1, precision: 0 },
+  { inputId: 'toolsSamAudioMaxChunkDuration', rangeId: 'toolsSamAudioMaxChunkDurationRange', min: 10, max: 60, step: 1, precision: 0 },
+  { inputId: 'toolsSamAudioChunkOverlap', rangeId: 'toolsSamAudioChunkOverlapRange', min: 0, max: 30, step: 0.5, precision: 1 },
 ];
 const TOPAZ_HELP_TARGETS = [
   { key: 'sourceImage', selector: '#toolsEnhancerWorkspace .group-label', placement: 'group' },
@@ -386,6 +419,18 @@ const TOPAZ_HELP_TARGETS = [
   { key: 'sourceImage', selector: '#toolsBgRemovalWorkspace .group-label', placement: 'group' },
   { key: 'cutout_output_format', selector: '#toolsBgOutputFormatField > label' },
   { key: 'cutout_sync_mode', selector: '#toolsBgSyncModeField > label' },
+  { key: 'sourceAudio', selector: '#toolsSamAudioWorkspace .group-label', placement: 'group' },
+  { key: 'sam_audio_model', selector: '#toolsSamAudioModelField > label' },
+  { key: 'sam_audio_output_format', selector: '#toolsSamAudioOutputFormatField > label' },
+  { key: 'sam_audio_prompt', selector: '#toolsSamAudioPromptField > label' },
+  { key: 'sam_audio_predict_spans', selector: '#toolsSamAudioPredictSpans', placement: 'toggle' },
+  { key: 'sam_audio_spans', selector: '#toolsSamAudioSpansField > label' },
+  { key: 'sam_audio_reranking_candidates', selector: '#toolsSamAudioRerankingField > label' },
+  { key: 'sam_audio_acceleration', selector: '#toolsSamAudioAccelerationField > label' },
+  { key: 'sam_audio_max_chunk_duration', selector: '#toolsSamAudioMaxChunkField > label' },
+  { key: 'sam_audio_chunk_overlap', selector: '#toolsSamAudioChunkOverlapField > label' },
+  { key: 'sam_audio_use_sound_activity_ranking', selector: '#toolsSamAudioUseSoundActivityRanking', placement: 'toggle' },
+  { key: 'sam_audio_trim_to_span', selector: '#toolsSamAudioTrimToSpan', placement: 'toggle' },
 ];
 let activeToolsHelpButton = null;
 let toolsHelpPopoverEl = null;
@@ -400,6 +445,26 @@ function toolsUiText(key, fallback = '') {
 
 function toolsHelpAria(labelText) {
   return toolsUiText('tools_help_aria', '{label} help').replace('{label}', labelText || toolsUiText('tools_help_title', 'Setting Help'));
+}
+
+function createAudioPlaceholderDataUrl(label = 'AUDIO') {
+  return `data:image/svg+xml,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
+      <defs>
+        <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0%" stop-color="#1f1728"/>
+          <stop offset="100%" stop-color="#0b0a10"/>
+        </linearGradient>
+      </defs>
+      <rect width="96" height="96" rx="16" fill="url(#g)"/>
+      <rect x="18" y="38" width="6" height="20" rx="3" fill="#d4915a" opacity="0.75"/>
+      <rect x="30" y="30" width="6" height="36" rx="3" fill="#f2c69b" opacity="0.82"/>
+      <rect x="42" y="24" width="6" height="48" rx="3" fill="#ffffff" opacity="0.92"/>
+      <rect x="54" y="30" width="6" height="36" rx="3" fill="#f2c69b" opacity="0.82"/>
+      <rect x="66" y="38" width="6" height="20" rx="3" fill="#d4915a" opacity="0.75"/>
+      <text x="50%" y="84" dominant-baseline="middle" text-anchor="middle" fill="#e8d6c0" font-family="Arial" font-size="10" letter-spacing="1.2">${label}</text>
+    </svg>`
+  )}`;
 }
 
 function resolveToolsHelpButtonTitle(buttonEl) {
@@ -447,7 +512,8 @@ function isRemoteAssetItem(item) {
 
 function createRemoteAssetItem(payload = {}) {
   if (!payload || !payload.url) return null;
-  const type = payload.type || (String(payload.mimeHint || '').startsWith('video/') ? 'video' : 'image');
+  const mimeHint = String(payload.mimeHint || '').toLowerCase();
+  const type = payload.type || (mimeHint.startsWith('video/') ? 'video' : mimeHint.startsWith('audio/') ? 'audio' : 'image');
   const fallbackExt = type === 'video' ? 'mp4' : type === 'audio' ? 'mp3' : 'png';
   const name = payload.filename || deriveFilenameFromUrl(payload.url, fallbackExt);
   return {
@@ -1006,7 +1072,7 @@ function setUploadSurfaceLoading(surfaceEl, loading) {
 function applyInternalAssetUrlToManagedInput(inputEl, payload) {
   if (!inputEl || !payload || !payload.url) return false;
   const config = inputEl._uploadConfig;
-  if (!config || !config.kind || (config.kind !== 'image' && config.kind !== 'video')) return false;
+  if (!config || !config.kind || (config.kind !== 'image' && config.kind !== 'video' && config.kind !== 'audio')) return false;
   if (payload.type && config.kind && payload.type !== config.kind) return false;
   const remoteItem = createRemoteAssetItem(payload);
   if (!remoteItem) return false;
@@ -1202,6 +1268,10 @@ const ASSET_TARGETS = {
     { label: 'Video → Video Input', i18nKey: 'asset_video_input', mode: 'video', inputId: 'videoInput', videoTab: 'video-to-video' },
     { label: 'Kling3 → Video Input', i18nKey: 'asset_kling3_video', mode: 'video', inputId: 'kling3VideoInput', videoTab: 'video-to-video', kling3Tab: 'video-to-video' },
   ],
+  audio: [
+    { label: 'Video → Audio Input', mode: 'video', inputId: 'audioInput', videoTab: 'audio-to-video' },
+    { label: 'Tools → SAM Audio', mode: 'tools', inputId: 'toolsUtilityAudioInput', toolsTool: 'sam-audio' },
+  ],
   '3d': [
     { label: '3D Topology → 3D File', i18nKey: 'asset_3d_topology', mode: '3d', inputId: 'threeDTopologyFileInput', select3dModel: 'fal-ai/hunyuan-3d/v3.1/smart-topology' },
     { label: '3D Retexture → 3D Model', i18nKey: 'asset_3d_retexture_model', mode: '3d', inputId: 'threeDRetextureModelInput', select3dModel: 'fal-ai/meshy/v5/retexture' },
@@ -1359,6 +1429,7 @@ const MANAGED_UPLOADS = {
   videoEndImageInput: { labelId: 'endImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedEndImageFile ? [uploadedEndImageFile] : [], setFiles: (next) => { uploadedEndImageFile = next || null; } },
   audioInput: { labelId: 'audioFileLabel', emptyKey: 'select_audio', kind: 'audio', multiple: false, showFileName: true, getFiles: () => uploadedAudioFile ? [uploadedAudioFile] : [], setFiles: (next) => { uploadedAudioFile = next || null; } },
   toolsUtilityImageInput: { labelId: 'toolsUtilityImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedToolsUtilityImage ? [uploadedToolsUtilityImage] : [], setFiles: (next) => { uploadedToolsUtilityImage = next || null; } },
+  toolsUtilityAudioInput: { labelId: 'toolsUtilityAudioLabel', emptyKey: 'select_audio', kind: 'audio', multiple: false, showFileName: true, getFiles: () => uploadedToolsUtilityAudio ? [uploadedToolsUtilityAudio] : [], setFiles: (next) => { uploadedToolsUtilityAudio = next || null; } },
   kling3StartImageInput: { labelId: 'kling3StartImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3StartImage ? [uploadedKling3StartImage] : [], setFiles: (next) => { uploadedKling3StartImage = next || null; } },
   kling3EndImageInput: { labelId: 'kling3EndImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3EndImage ? [uploadedKling3EndImage] : [], setFiles: (next) => { uploadedKling3EndImage = next || null; } },
   kling3VideoInput: { labelId: 'kling3VideoLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: false, remoteUrlInputId: 'kling3VideoUrlInput', getFiles: () => uploadedKling3Video ? [uploadedKling3Video] : [], setFiles: (next) => { uploadedKling3Video = next || null; } },
@@ -1628,7 +1699,7 @@ function refreshManagedUploadUi(inputEl) {
   const labelEl = config.labelId ? qs(config.labelId) : null;
   if (labelEl) labelEl.textContent = getManagedUploadLabel(config, files);
   renderCompactPreviewForInput(inputEl, config);
-  if (inputEl.id === 'toolsUtilityImageInput') refreshToolsUtilitySourceUi();
+  if (inputEl.id === 'toolsUtilityImageInput' || inputEl.id === 'toolsUtilityAudioInput') refreshToolsUtilitySourceUi();
 }
 
 function bindManagedUploadInput(inputEl, config) {
@@ -1678,19 +1749,21 @@ function refreshAllManagedUploads() {
 }
 
 function createInternalAssetPayload(item) {
-  if (!item || (item.type !== 'image' && item.type !== 'video')) return null;
+  if (!item || (item.type !== 'image' && item.type !== 'video' && item.type !== 'audio')) return null;
   const meta = item && item.meta && typeof item.meta === 'object' ? item.meta : null;
   const resolvedUrl = item.type === 'video'
     ? (meta && (meta.originalDownloadUrl || meta.originalUrl)) || item.modelDownloadUrl || item.url || ''
-    : (meta && (meta.originalUrl || meta.originalDownloadUrl)) || item.url || item.thumbnailUrl || '';
+    : item.type === 'audio'
+      ? (meta && (meta.originalUrl || meta.originalDownloadUrl)) || item.url || ''
+      : (meta && (meta.originalUrl || meta.originalDownloadUrl)) || item.url || item.thumbnailUrl || '';
   if (!resolvedUrl) return null;
-  const fallbackExt = item.type === 'video' ? 'mp4' : 'png';
+  const fallbackExt = item.type === 'video' ? 'mp4' : item.type === 'audio' ? (meta && meta.outputFormat ? String(meta.outputFormat).toLowerCase() : 'wav') : 'png';
   const filename = deriveFilenameFromUrl(resolvedUrl, fallbackExt);
   return {
     type: item.type,
     url: resolvedUrl,
     filename,
-    mimeHint: inferMimeTypeFromName(filename, item.type === 'video' ? 'video/mp4' : 'image/png'),
+    mimeHint: inferMimeTypeFromName(filename, item.type === 'video' ? 'video/mp4' : item.type === 'audio' ? 'audio/wav' : 'image/png'),
   };
 }
 
@@ -2037,6 +2110,10 @@ async function reuseFromHistory(index) {
   }
   if (normalizedMode === 'tools') {
     updateToolsEnhancerUi();
+    if (ctx.toolsTool === 'sam-audio' && Array.isArray(ctx.samAudioSpans)) {
+      restoreToolsSamAudioSpanState(ctx.samAudioSpans);
+    }
+    updateToolsSamAudioUi();
     refreshToolsUtilitySourceUi();
   }
   if (normalizedMode === 'video') {
@@ -4857,16 +4934,23 @@ function getToolsUtilitySource() {
   return getManagedUploadPrimarySource(MANAGED_UPLOADS.toolsUtilityImageInput, uploadedToolsUtilityImage);
 }
 
+function getToolsUtilityAudioSource() {
+  return getManagedUploadPrimarySource(MANAGED_UPLOADS.toolsUtilityAudioInput, uploadedToolsUtilityAudio);
+}
+
 function getActiveToolsModelId() {
   if (currentToolsTool === 'enhancer') return TOOLS_TOOL_MODEL_IDS.enhancer;
   if (currentToolsTool === 'background-removal') return TOOLS_TOOL_MODEL_IDS['background-removal'];
+  if (currentToolsTool === 'sam-audio') {
+    return qs('toolsSamAudioModel') ? qs('toolsSamAudioModel').value : TOOLS_TOOL_MODEL_IDS['sam-audio'];
+  }
   return qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
 }
 
 function refreshToolsUtilitySourceUi() {
-  const config = MANAGED_UPLOADS.toolsUtilityImageInput;
+  const imageConfig = MANAGED_UPLOADS.toolsUtilityImageInput;
   const source = getToolsUtilitySource();
-  const labelText = getManagedUploadLabel(config, getManagedUploadFiles(config));
+  const labelText = getManagedUploadLabel(imageConfig, getManagedUploadFiles(imageConfig));
   const idleLabel = toolsUiText('tools_utility_idle_label', 'Click or drag a source image');
   const hintText = source
     ? toolsUiText('tools_utility_ready_hint', 'Shared source image is ready for every utility tool.')
@@ -4890,6 +4974,19 @@ function refreshToolsUtilitySourceUi() {
     const zone = qs(zoneId);
     if (zone) zone.classList.toggle('is-loaded', !!source);
   });
+
+  const audioConfig = MANAGED_UPLOADS.toolsUtilityAudioInput;
+  const audioSource = getToolsUtilityAudioSource();
+  const audioLabel = qs('toolsUtilityAudioLabel');
+  if (audioLabel) audioLabel.textContent = getManagedUploadLabel(audioConfig, getManagedUploadFiles(audioConfig));
+  const audioHint = qs('toolsUtilityAudioHint');
+  if (audioHint) {
+    audioHint.textContent = audioSource
+      ? toolsUiText('tools_sam_audio_ready_hint', 'Audio source is ready for separation.')
+      : toolsUiText('tools_sam_audio_idle_hint', 'WAV, MP3, FLAC');
+  }
+  const audioZone = qs('toolsUtilityAudioDropzone');
+  if (audioZone) audioZone.classList.toggle('is-loaded', !!audioSource);
 }
 
 function clampEnhancerValue(value, meta) {
@@ -5155,6 +5252,137 @@ function updateToolsEnhancerUi() {
   TOPAZ_RANGE_CONTROLS.forEach((meta) => syncEnhancerRangeControl(meta, 'input', false));
 }
 
+function getToolsSamAudioModelId() {
+  return qs('toolsSamAudioModel') ? qs('toolsSamAudioModel').value : TOOLS_TOOL_MODEL_IDS['sam-audio'];
+}
+
+function createToolsSamAudioSpanRow(span = {}) {
+  const row = document.createElement('div');
+  row.className = 'tools-sam-span-row';
+  row.innerHTML =
+    `<div class="field">` +
+      `<label>${toolsUiText('tools_sam_audio_span_start', 'Start (s)')}</label>` +
+      `<input type="number" class="tools-sam-span-start" min="0" step="0.1" value="${escapeHtml(String(Number.isFinite(Number(span.start)) ? Number(span.start) : 0))}">` +
+    `</div>` +
+    `<div class="field">` +
+      `<label>${toolsUiText('tools_sam_audio_span_end', 'End (s)')}</label>` +
+      `<input type="number" class="tools-sam-span-end" min="0" step="0.1" value="${escapeHtml(String(Number.isFinite(Number(span.end)) ? Number(span.end) : 10))}">` +
+    `</div>` +
+    `<label class="tools-utility-toggle tools-sam-span-toggle" for="">` +
+      `<span class="tools-toggle-copy"><span>${toolsUiText('tools_sam_audio_span_include', 'Include')}</span></span>` +
+      `<input type="checkbox" class="tools-sam-span-include"${span.include === false ? '' : ' checked'}>` +
+    `</label>` +
+    `<button type="button" class="tools-sam-span-remove" aria-label="${escapeHtml(getI18nText('btn_remove', 'Remove'))}" title="${escapeHtml(getI18nText('btn_remove', 'Remove'))}"><i data-lucide="x"></i></button>`;
+  const removeBtn = row.querySelector('.tools-sam-span-remove');
+  if (removeBtn) {
+    removeBtn.addEventListener('click', () => {
+      row.remove();
+      saveAppState();
+      requestAnimationFrame(() => {
+        if (window.lucide && typeof window.lucide.createIcons === 'function') {
+          window.lucide.createIcons();
+        }
+      });
+    });
+  }
+  row.querySelectorAll('input').forEach((input) => {
+    input.addEventListener('input', saveAppState);
+    input.addEventListener('change', saveAppState);
+  });
+  return row;
+}
+
+function getToolsSamAudioSpanState() {
+  const list = qs('toolsSamAudioSpansList');
+  if (!list) return [];
+  return Array.from(list.querySelectorAll('.tools-sam-span-row')).map((row) => {
+    const start = Number(row.querySelector('.tools-sam-span-start')?.value);
+    const end = Number(row.querySelector('.tools-sam-span-end')?.value);
+    const include = !!row.querySelector('.tools-sam-span-include')?.checked;
+    return { start, end, include };
+  }).filter((span) => Number.isFinite(span.start) && Number.isFinite(span.end));
+}
+
+function restoreToolsSamAudioSpanState(spans) {
+  const list = qs('toolsSamAudioSpansList');
+  if (!list) return;
+  list.innerHTML = '';
+  const nextSpans = Array.isArray(spans) ? spans : [];
+  nextSpans.forEach((span) => list.appendChild(createToolsSamAudioSpanRow(span)));
+  requestAnimationFrame(() => {
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
+  });
+}
+
+function ensureToolsSamAudioSpanRows() {
+  const list = qs('toolsSamAudioSpansList');
+  if (!list) return;
+  if (!list.querySelector('.tools-sam-span-row')) {
+    list.appendChild(createToolsSamAudioSpanRow());
+  }
+  requestAnimationFrame(() => {
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
+  });
+}
+
+function toolsAddSamAudioSpan(span = {}) {
+  const list = qs('toolsSamAudioSpansList');
+  if (!list) return;
+  list.appendChild(createToolsSamAudioSpanRow(span));
+  saveAppState();
+  requestAnimationFrame(() => {
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
+  });
+}
+window.toolsAddSamAudioSpan = toolsAddSamAudioSpan;
+
+function collectToolsSamAudioSpans() {
+  return getToolsSamAudioSpanState()
+    .map((span) => ({
+      start: Math.max(0, Number(span.start) || 0),
+      end: Math.max(0, Number(span.end) || 0),
+      include: span.include !== false,
+    }))
+    .filter((span) => span.end > span.start);
+}
+
+function updateToolsSamAudioUi() {
+  const modelId = getToolsSamAudioModelId();
+  const isSpanMode = modelId === 'fal-ai/sam-audio/span-separate';
+  const setVisible = (id, visible) => {
+    const el = qs(id);
+    if (el) el.style.display = visible ? '' : 'none';
+  };
+
+  setVisible('toolsSamAudioPredictSpansField', !isSpanMode);
+  setVisible('toolsSamAudioSpansField', isSpanMode);
+  setVisible('toolsSamAudioSoundActivityField', isSpanMode);
+  setVisible('toolsSamAudioTrimField', isSpanMode);
+
+  if (isSpanMode) ensureToolsSamAudioSpanRows();
+
+  const noteEl = qs('toolsSamAudioModelNote');
+  if (noteEl) {
+    const noteKey = SAM_AUDIO_MODEL_NOTES[modelId] || 'tools_sam_audio_note_fallback';
+    noteEl.textContent = toolsUiText(noteKey, 'Only settings that apply to the selected SAM Audio mode are shown.');
+  }
+
+  if (activeToolsHelpButton) {
+    const hiddenField = activeToolsHelpButton.closest('.field, .tools-utility-toggle, .group-label');
+    if (!document.body.contains(activeToolsHelpButton) || (hiddenField && hiddenField.offsetParent === null)) {
+      closeToolsHelpPopover();
+    }
+  }
+
+  TOPAZ_RANGE_CONTROLS.forEach((meta) => syncEnhancerRangeControl(meta, 'input', false));
+}
+
 function switchToolsTool(tool, options = {}) {
   const nextTool = TOOLS_TOOL_IDS.has(tool) ? tool : 'card-studio';
   if (!options.force && currentToolsTool === nextTool) {
@@ -5174,6 +5402,7 @@ function switchToolsTool(tool, options = {}) {
     'card-studio': qs('toolsCardStudioWorkspace'),
     enhancer: qs('toolsEnhancerWorkspace'),
     'background-removal': qs('toolsBgRemovalWorkspace'),
+    'sam-audio': qs('toolsSamAudioWorkspace'),
   };
 
   Object.entries(workspaces).forEach(([id, el]) => {
@@ -5191,6 +5420,7 @@ function switchToolsTool(tool, options = {}) {
   }
 
   updateToolsEnhancerUi();
+  updateToolsSamAudioUi();
   refreshToolsUtilitySourceUi();
   if (!options.skipSave) saveAppState();
   requestAnimationFrame(() => {
@@ -5203,18 +5433,23 @@ window.switchToolsTool = switchToolsTool;
 
 function initToolsUtilityControls() {
   const utilityInput = qs('toolsUtilityImageInput');
-  if (!utilityInput || utilityInput._toolsUtilityBound) {
+  const utilityAudioInput = qs('toolsUtilityAudioInput');
+  if (!utilityInput || !utilityAudioInput || utilityInput._toolsUtilityBound) {
     initTopazHelpButtons();
     initToolsEnhancerRanges();
     refreshToolsUtilitySourceUi();
     updateToolsEnhancerUi();
+    updateToolsSamAudioUi();
     return;
   }
 
   utilityInput._toolsUtilityBound = true;
+  utilityAudioInput._toolsUtilityBound = true;
   bindManagedUploadById('toolsUtilityImageInput');
+  bindManagedUploadById('toolsUtilityAudioInput');
   setupDropZone(qs('toolsUtilityImageDropzone'), utilityInput);
   setupDropZone(qs('toolsBgRemovalDropzone'), utilityInput);
+  setupDropZone(qs('toolsUtilityAudioDropzone'), utilityAudioInput);
 
   const enhancerModel = qs('toolsEnhancerModel');
   if (enhancerModel) enhancerModel.addEventListener('change', () => {
@@ -5226,11 +5461,22 @@ function initToolsUtilityControls() {
     updateToolsEnhancerUi();
     saveAppState();
   });
+  const samModel = qs('toolsSamAudioModel');
+  if (samModel) samModel.addEventListener('change', () => {
+    updateToolsSamAudioUi();
+    saveAppState();
+  });
+
+  if (Array.isArray(window._samAudioRestoredSpans)) {
+    restoreToolsSamAudioSpanState(window._samAudioRestoredSpans);
+    window._samAudioRestoredSpans = null;
+  }
 
   initTopazHelpButtons();
   initToolsEnhancerRanges();
   refreshToolsUtilitySourceUi();
   updateToolsEnhancerUi();
+  updateToolsSamAudioUi();
 }
 
 function initToolsControls() {
@@ -6694,6 +6940,48 @@ async function submitToolsRequest(task) {
     return await bgRes.json();
   }
 
+  if (task && task.toolsTool === 'sam-audio') {
+    const audioSource = getToolsUtilityAudioSource();
+    const audioUrl = await resolveUploadItemUrl(audioSource, 'tools-sam-audio-source', task);
+    if (!audioUrl) throw new Error(window.I18N ? I18N.t('select_audio') : 'Select audio');
+
+    const modelId = getToolsSamAudioModelId();
+    const isSpanMode = modelId === 'fal-ai/sam-audio/span-separate';
+    const prompt = qs('toolsSamAudioPrompt') ? qs('toolsSamAudioPrompt').value.trim() : '';
+    const body = {
+      model_id: modelId,
+      audio_url: audioUrl,
+      reranking_candidates: Math.max(1, Math.min(7, Number(qs('toolsSamAudioRerankingCandidates') ? qs('toolsSamAudioRerankingCandidates').value : 1) || 1)),
+      acceleration: qs('toolsSamAudioAcceleration') ? qs('toolsSamAudioAcceleration').value : 'balanced',
+      max_chunk_duration: Math.max(10, Math.min(60, Number(qs('toolsSamAudioMaxChunkDuration') ? qs('toolsSamAudioMaxChunkDuration').value : 60) || 60)),
+      chunk_overlap: Math.max(0, Math.min(30, Number(qs('toolsSamAudioChunkOverlap') ? qs('toolsSamAudioChunkOverlap').value : 5) || 0)),
+      output_format: qs('toolsSamAudioOutputFormat') ? qs('toolsSamAudioOutputFormat').value : 'wav',
+    };
+
+    if (prompt) body.prompt = prompt;
+
+    if (isSpanMode) {
+      const spans = collectToolsSamAudioSpans();
+      if (!spans.length) throw new Error(toolsUiText('tools_sam_audio_error_spans', 'Add at least one valid span.'));
+      body.spans = spans;
+      body.use_sound_activity_ranking = !!(qs('toolsSamAudioUseSoundActivityRanking') && qs('toolsSamAudioUseSoundActivityRanking').checked);
+      body.trim_to_span = !!(qs('toolsSamAudioTrimToSpan') && qs('toolsSamAudioTrimToSpan').checked);
+      if (!prompt && !body.use_sound_activity_ranking && body.reranking_candidates > 1) {
+        body.reranking_candidates = 1;
+      }
+    } else {
+      body.predict_spans = !!(qs('toolsSamAudioPredictSpans') && qs('toolsSamAudioPredictSpans').checked);
+    }
+
+    const samRes = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!samRes.ok) throw await createResponseError(samRes, 'SAM Audio separation failed');
+    return await samRes.json();
+  }
+
   const modelId = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
   const isNano2 = modelId === 'nano-banana-2/edit';
   const isGpt = modelId === 'gpt-image-1.5/edit';
@@ -7619,7 +7907,7 @@ function openMediaModal(item) {
   currentPreview = item;
   body.innerHTML = '';
 
-  title.textContent = (item && item.prompt) ? item.prompt : (item.type === 'video' ? 'Video' : (item.type === '3d' ? '3D Model' : 'Image'));
+  title.textContent = (item && item.prompt) ? item.prompt : (item.type === 'video' ? 'Video' : (item.type === 'audio' ? 'Audio' : (item.type === '3d' ? '3D Model' : 'Image')));
 
   const hasUrl = item && (item.url || item.glbUrl || item.modelDownloadUrl);
   if (dl) {
@@ -7632,6 +7920,10 @@ function openMediaModal(item) {
     } else if (item && item.type === 'video') {
       dl.dataset.dlUrl = item.url;
       dl.dataset.dlName = `generation-${item.timestamp || Date.now()}.mp4`;
+    } else if (item && item.type === 'audio') {
+      const ext = deriveFilenameFromUrl(item.url || '', (item.meta && item.meta.outputFormat) || 'wav').split('.').pop() || 'wav';
+      dl.dataset.dlUrl = item.url;
+      dl.dataset.dlName = `generation-${item.timestamp || Date.now()}.${ext}`;
     } else if (item) {
       dl.dataset.dlUrl = item.url;
       dl.dataset.dlName = `generation-${item.timestamp || Date.now()}.png`;
@@ -7648,6 +7940,35 @@ function openMediaModal(item) {
     v.playsInline = true;
     v.src = item.url;
     body.appendChild(v);
+  } else if (item.type === 'audio') {
+    const wrap = document.createElement('div');
+    wrap.className = 'result-audio-grid';
+
+    const targetCard = document.createElement('div');
+    targetCard.className = 'result-audio-card';
+    targetCard.innerHTML = `<div class="result-audio-card-title"><i data-lucide="audio-lines"></i><span>${escapeHtml(toolsUiText('tools_sam_audio_result_target', 'Isolated Target'))}</span></div>`;
+    const targetAudio = document.createElement('audio');
+    targetAudio.controls = true;
+    targetAudio.preload = 'metadata';
+    targetAudio.src = item.url;
+    targetAudio.className = 'result-audio-player';
+    targetCard.appendChild(targetAudio);
+    wrap.appendChild(targetCard);
+
+    const residualUrl = item.residualUrl || (item.meta && (item.meta.residualUrl || item.meta.originalResidualUrl)) || '';
+    if (residualUrl) {
+      const residualCard = document.createElement('div');
+      residualCard.className = 'result-audio-card';
+      residualCard.innerHTML = `<div class="result-audio-card-title"><i data-lucide="waves"></i><span>${escapeHtml(toolsUiText('tools_sam_audio_result_residual', 'Residual Mix'))}</span></div>`;
+      const residualAudio = document.createElement('audio');
+      residualAudio.controls = true;
+      residualAudio.preload = 'metadata';
+      residualAudio.src = residualUrl;
+      residualAudio.className = 'result-audio-player';
+      residualCard.appendChild(residualAudio);
+      wrap.appendChild(residualCard);
+    }
+    body.appendChild(wrap);
   } else if (item.type === '3d' && item.glbUrl) {
     const mv = document.createElement('model-viewer');
     mv.setAttribute('camera-controls', '');
@@ -7674,7 +7995,7 @@ function openMediaModal(item) {
   }
 
   bindAssetDragSource(body, item);
-  const modalMedia = body.querySelector('img, video');
+  const modalMedia = body.querySelector('img, video, audio');
   if (modalMedia) bindAssetDragSource(modalMedia, item, { badge: false });
 
   modal.style.display = 'flex';
@@ -7717,6 +8038,7 @@ window.addEventListener('keydown', (e) => {
 // Inline SVG icons for history items — avoids expensive global lucide.createIcons() scan
 const _historyIcons = {
   play: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>',
+  audio: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6v12"></path><path d="M8 8v8"></path><path d="M16 8v8"></path><path d="M4 10v4"></path><path d="M20 10v4"></path></svg>',
   box: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="M12 22V12"></path></svg>',
   image: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"></path></svg>',
   'repeat-2': '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 9 3-3 3 3"></path><path d="M13 18H7a2 2 0 0 1-2-2V6"></path><path d="m22 15-3 3-3-3"></path><path d="M11 6h6a2 2 0 0 1 2 2v10"></path></svg>',
@@ -7750,6 +8072,7 @@ function getHistoryPromptText(item) {
 
 function getHistoryFallbackLabel(item) {
   if (item && item.type === 'video') return i18nText('opt_video', 'Video');
+  if (item && item.type === 'audio') return i18nText('opt_audio', 'Audio');
   if (item && item.type === '3d') return i18nText('tab_3d', '3D');
   return i18nText('opt_image', 'Image');
 }
@@ -7758,6 +8081,9 @@ function getHistoryFallbackLabel(item) {
 function getHistoryThumb(item) {
   if (item.type === 'video') {
     return item.thumbnailUrl || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><polygon fill="#fff" points="26,20 26,44 46,32"/></svg>')}`;
+  }
+  if (item.type === 'audio') {
+    return item.thumbnailUrl || createAudioPlaceholderDataUrl('AUDIO');
   }
   if (item.type === '3d') {
     return item.thumbnailUrl || item.url || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><path fill="#fff" d="M32 16L48 26V42L32 52L16 42V26L32 16Z" stroke="#fff" stroke-width="2" fill="none"/></svg>')}`;
@@ -8021,7 +8347,7 @@ function updateHistoryUI() {
   for (const entry of renderItems) {
     const item = entry.item;
     const idx = entry.index;
-    const icon = item.type === 'video' ? 'play' : (item.type === '3d' ? 'box' : 'image');
+    const icon = item.type === 'video' ? 'play' : (item.type === 'audio' ? 'audio' : (item.type === '3d' ? 'box' : 'image'));
     const thumbSrc = getHistoryThumb(item);
     const promptText = getHistoryPromptText(item) || getHistoryFallbackLabel(item);
     const timeText = item && item.timestamp
@@ -8282,7 +8608,7 @@ function renderFhgGallery() {
   for (const entry of items) {
     const item = entry.item;
     const idx = entry.index;
-    const icon = item.type === 'video' ? 'play' : (item.type === '3d' ? 'box' : 'image');
+    const icon = item.type === 'video' ? 'play' : (item.type === 'audio' ? 'audio' : (item.type === '3d' ? 'box' : 'image'));
     const thumbSrc = getHistoryThumb(item);
     const promptText = getHistoryPromptText(item) || getHistoryFallbackLabel(item);
     const timeText = item && item.timestamp
@@ -8405,6 +8731,10 @@ function downloadFromHistory(index, event) {
   } else if (item.type === 'video') {
     url = item.url;
     name = `generation-${item.timestamp || Date.now()}.mp4`;
+  } else if (item.type === 'audio') {
+    url = item.url;
+    const ext = deriveFilenameFromUrl(item.url || '', (item.meta && item.meta.outputFormat) || 'wav').split('.').pop() || 'wav';
+    name = `generation-${item.timestamp || Date.now()}.${ext}`;
   } else {
     url = item.url;
     name = `generation-${item.timestamp || Date.now()}.png`;
@@ -8413,11 +8743,57 @@ function downloadFromHistory(index, event) {
 }
 window.downloadFromHistory = downloadFromHistory;
 
+function renderAudioPreview(item) {
+  const pane = qs('resultAudioPane');
+  if (!pane) return;
+  const meta = item && item.meta && typeof item.meta === 'object' ? item.meta : {};
+  const residualUrl = item && (item.residualUrl || meta.residualUrl || meta.originalResidualUrl) ? String(item.residualUrl || meta.residualUrl || meta.originalResidualUrl) : '';
+  const duration = Number.isFinite(Number(item && item.duration)) ? Number(item.duration) : (Number.isFinite(Number(meta.duration)) ? Number(meta.duration) : null);
+  const sampleRate = Number.isFinite(Number(item && item.sampleRate)) ? Number(item.sampleRate) : (Number.isFinite(Number(meta.sampleRate)) ? Number(meta.sampleRate) : null);
+  const outputFormat = (meta.outputFormat || deriveFilenameFromUrl(item && item.url ? item.url : '', 'wav').split('.').pop() || 'wav').toString().toUpperCase();
+  const chips = [
+    outputFormat,
+    duration ? `${duration.toFixed(1)}s` : null,
+    sampleRate ? `${sampleRate} Hz` : null,
+  ].filter(Boolean);
+
+  pane.innerHTML =
+    `<div class="result-audio-grid">` +
+      `<div class="result-audio-card">` +
+        `<div class="result-audio-card-head">` +
+          `<div class="result-audio-card-title"><i data-lucide="audio-lines"></i><span>${escapeHtml(toolsUiText('tools_sam_audio_result_target', 'Isolated Target'))}</span></div>` +
+          `<button type="button" class="result-audio-download" data-audio-download="${escapeHtml(item.url || '')}" data-audio-name="${escapeHtml(deriveFilenameFromUrl(item.url || '', 'wav'))}" title="${escapeHtml(getI18nText('download', 'Download'))}"><i data-lucide="download"></i></button>` +
+        `</div>` +
+        `<audio class="result-audio-player" controls preload="metadata" src="${escapeHtml(item.url || '')}"></audio>` +
+        `<div class="result-audio-meta">${chips.map((chip) => `<span class="result-audio-chip">${escapeHtml(chip)}</span>`).join('')}</div>` +
+      `</div>` +
+      (residualUrl
+        ? `<div class="result-audio-card">` +
+            `<div class="result-audio-card-head">` +
+              `<div class="result-audio-card-title"><i data-lucide="waves"></i><span>${escapeHtml(toolsUiText('tools_sam_audio_result_residual', 'Residual Mix'))}</span></div>` +
+              `<button type="button" class="result-audio-download" data-audio-download="${escapeHtml(residualUrl)}" data-audio-name="${escapeHtml(deriveFilenameFromUrl(residualUrl, 'wav'))}" title="${escapeHtml(getI18nText('download', 'Download'))}"><i data-lucide="download"></i></button>` +
+            `</div>` +
+            `<audio class="result-audio-player" controls preload="metadata" src="${escapeHtml(residualUrl)}"></audio>` +
+            `<div class="result-audio-meta"><span class="result-audio-chip">${escapeHtml(toolsUiText('tools_sam_audio_result_residual_hint', 'Everything except the isolated sound'))}</span></div>` +
+          `</div>`
+        : '') +
+    `</div>`;
+
+  pane.querySelectorAll('[data-audio-download]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      forceDownload(btn.dataset.audioDownload, btn.dataset.audioName);
+    });
+  });
+}
+
 function displayResult(item) {
   currentPreview = item;
 
   const img = qs('resultImage');
   const vid = qs('resultVideo');
+  const audioPane = qs('resultAudioPane');
   const model = qs('resultModel');
   const placeholder = qs('placeholder');
   const dl = qs('downloadBtn');
@@ -8426,6 +8802,7 @@ function displayResult(item) {
   const assetBtn = qs('useAsAssetBtn');
 
   if (item.type === 'video') {
+    if (audioPane) { audioPane.style.display = 'none'; audioPane.innerHTML = ''; }
     if (img) img.style.display = 'none';
     if (model) model.style.display = 'none';
     if (vid) {
@@ -8438,7 +8815,22 @@ function displayResult(item) {
       dl.dataset.dlUrl = item.url;
       dl.dataset.dlName = `generation-${item.timestamp || Date.now()}.mp4`;
     }
+  } else if (item.type === 'audio') {
+    if (vid) { if (typeof vid.pause === 'function') vid.pause(); vid.style.display = 'none'; vid.removeAttribute('src'); vid.removeAttribute('poster'); }
+    if (img) img.style.display = 'none';
+    if (model) model.style.display = 'none';
+    if (audioPane) {
+      renderAudioPreview(item);
+      audioPane.style.display = 'block';
+    }
+    if (dl) {
+      const ext = deriveFilenameFromUrl(item.url || '', (item.meta && item.meta.outputFormat) || 'wav').split('.').pop() || 'wav';
+      dl.style.display = 'inline-flex';
+      dl.dataset.dlUrl = item.url;
+      dl.dataset.dlName = `generation-${item.timestamp || Date.now()}.${ext}`;
+    }
   } else if (item.type === '3d') {
+    if (audioPane) { audioPane.style.display = 'none'; audioPane.innerHTML = ''; }
     if (vid) vid.style.display = 'none';
     const dlUrl = item.modelDownloadUrl || item.glbUrl;
     const dlExt = item.modelFormat || 'glb';
@@ -8456,6 +8848,7 @@ function displayResult(item) {
       dl.dataset.dlName = `model-${item.timestamp || Date.now()}.${dlExt}`;
     }
   } else {
+    if (audioPane) { audioPane.style.display = 'none'; audioPane.innerHTML = ''; }
     if (vid) vid.style.display = 'none';
     if (model) model.style.display = 'none';
     if (img) {
@@ -8479,6 +8872,7 @@ function displayResult(item) {
   if (previewArea) bindAssetDragSource(previewArea, item);
   if (img) bindAssetDragSource(img, item.type === 'image' ? item : null, { badge: false });
   if (vid) bindAssetDragSource(vid, item.type === 'video' ? item : null, { badge: false });
+  if (audioPane) bindAssetDragSource(audioPane, item.type === 'audio' ? item : null, { badge: false });
 
   updateGalleryNav();
 
@@ -8799,6 +9193,19 @@ function extractAllMediaUrls(data, type) {
     }
   }
   return urls;
+}
+
+function extractSamAudioOutput(data) {
+  if (!data || typeof data !== 'object') return null;
+  const targetUrl = data && data.target && data.target.url ? String(data.target.url) : '';
+  const residualUrl = data && data.residual && data.residual.url ? String(data.residual.url) : '';
+  if (!targetUrl) return null;
+  return {
+    targetUrl,
+    residualUrl: residualUrl || null,
+    duration: Number.isFinite(Number(data.duration)) ? Number(data.duration) : null,
+    sampleRate: Number.isFinite(Number(data.sample_rate)) ? Number(data.sample_rate) : null,
+  };
 }
 
 function isGlbFile(fileObj) {
@@ -9603,6 +10010,34 @@ async function pollTask(taskId) {
             });
           }
         }
+      } else if (t.mode === 'tools' && t.toolsTool === 'sam-audio') {
+        const audioOut = extractSamAudioOutput(out);
+        if (!audioOut || !audioOut.targetUrl) throw new Error('No audio URL in response');
+        t.status = 'COMPLETED';
+        t.completedAt = Date.now();
+        t.mediaUrl = audioOut.targetUrl;
+        t.secondaryMediaUrl = audioOut.residualUrl || null;
+
+        if (!t.savedToHistory) {
+          const item = buildTaskHistoryItem(t, 'audio', audioOut.targetUrl, {
+            suffix: 'audio',
+            timestamp: t.completedAt,
+            meta: {
+              residualUrl: audioOut.residualUrl || null,
+              duration: audioOut.duration,
+              sampleRate: audioOut.sampleRate,
+              outputFormat: qs('toolsSamAudioOutputFormat') ? qs('toolsSamAudioOutputFormat').value : 'wav',
+              previewUrl: createAudioPlaceholderDataUrl('AUDIO'),
+            },
+          });
+          item.thumbnailUrl = createAudioPlaceholderDataUrl('AUDIO');
+          item.residualUrl = audioOut.residualUrl || null;
+          item.duration = audioOut.duration;
+          item.sampleRate = audioOut.sampleRate;
+          t.savedToHistory = true;
+          addToHistory(item);
+          displayResult(item);
+        }
       } else {
         const isVideoMode = t.mode === 'video' || t.mode === 'kling3';
         const urls = extractAllMediaUrls(out, isVideoMode ? 'video' : 'image');
@@ -9745,6 +10180,9 @@ function captureGenerationContext() {
   }
   const klingModelId = getSelectedKling3ModelId();
   if (klingModelId) ctx.selects.kling3Model = klingModelId;
+  if (currentMode === 'tools' && currentToolsTool === 'sam-audio') {
+    ctx.samAudioSpans = getToolsSamAudioSpanState();
+  }
   return ctx;
 }
 
@@ -9764,6 +10202,13 @@ async function handleGenerate() {
       const model = qs('toolsEnhancerModel') ? qs('toolsEnhancerModel').value : 'Standard V2';
       const factor = qs('toolsEnhancerUpscaleFactor') ? qs('toolsEnhancerUpscaleFactor').value : '2';
       prompt = `Topaz Enhancer · ${model} · ${factor}x`;
+    } else if (currentToolsTool === 'sam-audio') {
+      const modelId = getToolsSamAudioModelId();
+      const promptValue = qs('toolsSamAudioPrompt') ? qs('toolsSamAudioPrompt').value.trim() : '';
+      const label = modelId === 'fal-ai/sam-audio/span-separate'
+        ? toolsUiText('tools_sam_audio_model_span', 'Span Separation')
+        : toolsUiText('tools_sam_audio_model_separate', 'Prompt Separation');
+      prompt = `SAM Audio · ${label}${promptValue ? ` · ${promptValue}` : ''}`;
     } else {
       const format = qs('toolsBgOutputFormat') ? qs('toolsBgOutputFormat').value : 'rgba';
       prompt = `Background Removal · ${format}`;
@@ -9864,9 +10309,28 @@ async function handleGenerate() {
     }
   }
 
-  if (currentMode === 'tools' && currentToolsTool !== 'card-studio' && !getToolsUtilitySource()) {
-    showToast(window.I18N ? I18N.t('select_image') : 'Select image', 'error');
-    return;
+  if (currentMode === 'tools') {
+    if (currentToolsTool === 'enhancer' || currentToolsTool === 'background-removal') {
+      if (!getToolsUtilitySource()) {
+        showToast(window.I18N ? I18N.t('select_image') : 'Select image', 'error');
+        return;
+      }
+    } else if (currentToolsTool === 'sam-audio') {
+      const modelId = getToolsSamAudioModelId();
+      const promptValue = qs('toolsSamAudioPrompt') ? qs('toolsSamAudioPrompt').value.trim() : '';
+      if (!getToolsUtilityAudioSource()) {
+        showToast(window.I18N ? I18N.t('select_audio') : 'Select audio', 'error');
+        return;
+      }
+      if (modelId === 'fal-ai/sam-audio/separate' && !promptValue) {
+        showToast(window.I18N ? I18N.t('toast_enter_prompt') : 'Please enter a prompt', 'error');
+        return;
+      }
+      if (modelId === 'fal-ai/sam-audio/span-separate' && !collectToolsSamAudioSpans().length) {
+        showToast(toolsUiText('tools_sam_audio_error_spans', 'Add at least one valid span.'), 'error');
+        return;
+      }
+    }
   }
 
   const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -10175,13 +10639,16 @@ async function wizIdbSaveImages() {
     const prodArr = await Promise.all(uploadedToolsImages.map(toB64));
     const inspoArr = await Promise.all(uploadedInspoImages.map(toB64));
     const utilitySource = getToolsUtilitySource();
+    const utilityAudioSource = getToolsUtilityAudioSource();
     const utilityItem = utilitySource ? await toB64(utilitySource) : null;
+    const utilityAudioItem = utilityAudioSource ? await toB64(utilityAudioSource) : null;
     const db = await _wizIdbOpen();
     const tx = db.transaction('files', 'readwrite');
     const store = tx.objectStore('files');
     store.put(prodArr, 'productImages');
     store.put(inspoArr, 'inspoImages');
     store.put(utilityItem, 'utilityImage');
+    store.put(utilityAudioItem, 'utilityAudio');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
     db.close();
   } catch (e) { console.warn('IDB save failed', e); }
@@ -10190,20 +10657,23 @@ async function wizIdbRestoreImages() {
   try {
     const db = await _wizIdbOpen();
     // Issue BOTH requests synchronously before any await to keep the transaction active
-    const [prodArr, inspoArr, utilityItem] = await new Promise((resolve, reject) => {
+    const [prodArr, inspoArr, utilityItem, utilityAudioItem] = await new Promise((resolve, reject) => {
       const tx = db.transaction('files', 'readonly');
       const store = tx.objectStore('files');
       const prodReq = store.get('productImages');
       const inspoReq = store.get('inspoImages');
       const utilityReq = store.get('utilityImage');
-      let prod, inspo, utility, prodDone = false, inspoDone = false, utilityDone = false;
-      const check = () => { if (prodDone && inspoDone && utilityDone) resolve([prod, inspo, utility]); };
+      const utilityAudioReq = store.get('utilityAudio');
+      let prod, inspo, utility, utilityAudio, prodDone = false, inspoDone = false, utilityDone = false, utilityAudioDone = false;
+      const check = () => { if (prodDone && inspoDone && utilityDone && utilityAudioDone) resolve([prod, inspo, utility, utilityAudio]); };
       prodReq.onsuccess  = () => { prod  = prodReq.result  || null; prodDone  = true; check(); };
       prodReq.onerror    = () => { prod  = null;                     prodDone  = true; check(); };
       inspoReq.onsuccess = () => { inspo = inspoReq.result || null; inspoDone = true; check(); };
       inspoReq.onerror   = () => { inspo = null;                    inspoDone = true; check(); };
       utilityReq.onsuccess = () => { utility = utilityReq.result || null; utilityDone = true; check(); };
       utilityReq.onerror   = () => { utility = null; utilityDone = true; check(); };
+      utilityAudioReq.onsuccess = () => { utilityAudio = utilityAudioReq.result || null; utilityAudioDone = true; check(); };
+      utilityAudioReq.onerror = () => { utilityAudio = null; utilityAudioDone = true; check(); };
       tx.onerror = reject;
     });
     db.close();
@@ -10235,6 +10705,16 @@ async function wizIdbRestoreImages() {
     }
     const utilityInput = qs('toolsUtilityImageInput');
     if (utilityInput && utilityInput._uploadConfig) refreshManagedUploadUi(utilityInput);
+    const restoredUtilityAudioSource = b64ToFile(utilityAudioItem);
+    if (isRemoteAssetItem(restoredUtilityAudioSource)) {
+      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityAudioInput, restoredUtilityAudioSource);
+      uploadedToolsUtilityAudio = null;
+    } else {
+      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityAudioInput, []);
+      uploadedToolsUtilityAudio = restoredUtilityAudioSource;
+    }
+    const utilityAudioInput = qs('toolsUtilityAudioInput');
+    if (utilityAudioInput && utilityAudioInput._uploadConfig) refreshManagedUploadUi(utilityAudioInput);
   } catch (e) { console.warn('IDB restore failed', e); }
 }
 
@@ -10260,6 +10740,7 @@ const PERSISTED_SELECTS = [
   'aspectRatioBase',
   'toolsModel', 'toolsResolution', 'toolsAspectRatio', 'toolsWebSearch', 'toolsGoogleSearch',
   'toolsEnhancerModel', 'toolsEnhancerOutputFormat', 'toolsEnhancerSubjectDetection', 'toolsEnhancerCreativity', 'toolsEnhancerTexture',
+  'toolsSamAudioModel', 'toolsSamAudioOutputFormat', 'toolsSamAudioAcceleration',
   'toolsBgOutputFormat', 'toolsBgSyncMode',
 ];
 
@@ -10274,11 +10755,13 @@ const PERSISTED_INPUTS = [
   'toolsEnhancerUpscaleFactor', 'toolsEnhancerFaceStrength', 'toolsEnhancerFaceCreativity',
   'toolsEnhancerSharpen', 'toolsEnhancerDenoise', 'toolsEnhancerFixCompression',
   'toolsEnhancerStrength', 'toolsEnhancerDetail', 'toolsEnhancerPrompt',
+  'toolsSamAudioPrompt', 'toolsSamAudioRerankingCandidates', 'toolsSamAudioMaxChunkDuration', 'toolsSamAudioChunkOverlap',
 ];
 
 const PERSISTED_CHECKBOXES = [
   'toolsInspoMatchBg',
   'toolsEnhancerCropToFill', 'toolsEnhancerFaceEnhancement', 'toolsEnhancerAutoprompt',
+  'toolsSamAudioPredictSpans', 'toolsSamAudioUseSoundActivityRanking', 'toolsSamAudioTrimToSpan',
 ];
 
 function saveAppState() {
@@ -10317,6 +10800,10 @@ function saveAppState() {
     // Selected inspiration presets
     if (_wizSelectedPresets && _wizSelectedPresets.size > 0) {
       state.wizSelectedPresets = Array.from(_wizSelectedPresets);
+    }
+    const samAudioSpans = getToolsSamAudioSpanState();
+    if (samAudioSpans.length) {
+      state.samAudioSpans = samAudioSpans;
     }
     localStorage.setItem(APP_STATE_KEY, JSON.stringify(state));
     wizIdbSaveImages();
@@ -10390,6 +10877,7 @@ function restoreAppState() {
       chars: Array.isArray(state.wizChars) ? state.wizChars : null,
       selectedPresets: Array.isArray(state.wizSelectedPresets) ? state.wizSelectedPresets : null,
     };
+    window._samAudioRestoredSpans = Array.isArray(state.samAudioSpans) ? state.samAudioSpans : null;
 
     requestAnimationFrame(autoResizePromptInput);
 
@@ -10420,6 +10908,9 @@ function refreshLocalizedDynamicUi() {
   refreshAllManagedUploads();
   refreshToolsUtilitySourceUi();
   updateToolsEnhancerUi();
+  const samAudioSpans = getToolsSamAudioSpanState();
+  if (samAudioSpans.length) restoreToolsSamAudioSpanState(samAudioSpans);
+  updateToolsSamAudioUi();
   localizeVideoOptionFields(qs('videoOptionsDynamic'));
   if (typeof renderKling3Elements === 'function') renderKling3Elements();
 
@@ -10429,11 +10920,16 @@ function refreshLocalizedDynamicUi() {
   if (img) bindAssetDragSource(img, currentPreview && currentPreview.type === 'image' ? currentPreview : null, { badge: false });
   const vid = qs('resultVideo');
   if (vid) bindAssetDragSource(vid, currentPreview && currentPreview.type === 'video' ? currentPreview : null, { badge: false });
+  const audioPane = qs('resultAudioPane');
+  if (currentPreview && currentPreview.type === 'audio' && audioPane) {
+    renderAudioPreview(currentPreview);
+  }
+  if (audioPane) bindAssetDragSource(audioPane, currentPreview && currentPreview.type === 'audio' ? currentPreview : null, { badge: false });
 
   const modalBody = qs('mediaModalBody');
   if (modalBody) {
     bindAssetDragSource(modalBody, currentPreview);
-    const modalMedia = modalBody.querySelector('img, video');
+    const modalMedia = modalBody.querySelector('img, video, audio');
     if (modalMedia) bindAssetDragSource(modalMedia, currentPreview, { badge: false });
   }
 }
@@ -10457,12 +10953,14 @@ function clearPreviewDisplay() {
   galleryIndex = 0;
   const img = qs('resultImage');
   const vid = qs('resultVideo');
+  const audioPane = qs('resultAudioPane');
   const model = qs('resultModel');
   const placeholder = qs('placeholder');
   const dl = qs('downloadBtn');
   const assetBtn = qs('useAsAssetBtn');
   if (img) { img.style.display = 'none'; img.removeAttribute('src'); }
   if (vid) { if (typeof vid.pause === 'function') vid.pause(); vid.style.display = 'none'; vid.removeAttribute('src'); vid.removeAttribute('poster'); }
+  if (audioPane) { audioPane.style.display = 'none'; audioPane.innerHTML = ''; }
   if (model) { model.style.display = 'none'; model.removeAttribute('src'); }
   if (placeholder) placeholder.style.display = 'flex';
   if (dl) dl.style.display = 'none';

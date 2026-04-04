@@ -54,6 +54,17 @@ const IMAGE_MODELS = {
         allowed: ['model', 'upscale_factor', 'crop_to_fill', 'image_url', 'output_format', 'subject_detection', 'face_enhancement', 'face_enhancement_creativity', 'face_enhancement_strength', 'sharpen', 'denoise', 'fix_compression', 'strength', 'creativity', 'texture', 'prompt', 'autoprompt', 'detail'],
         requiresPrompt: false,
     },
+    'fal-ai/sam-audio/separate': {
+        endpoint: 'https://queue.fal.run/fal-ai/sam-audio/separate',
+        kind: 'audio-to-audio',
+        allowed: ['audio_url', 'prompt', 'predict_spans', 'reranking_candidates', 'acceleration', 'max_chunk_duration', 'chunk_overlap', 'output_format'],
+    },
+    'fal-ai/sam-audio/span-separate': {
+        endpoint: 'https://queue.fal.run/fal-ai/sam-audio/span-separate',
+        kind: 'audio-to-audio',
+        allowed: ['audio_url', 'prompt', 'spans', 'reranking_candidates', 'acceleration', 'max_chunk_duration', 'chunk_overlap', 'use_sound_activity_ranking', 'trim_to_span', 'output_format'],
+        requiresPrompt: false,
+    },
 };
 
 function pickAllowed(obj, allowed) {
