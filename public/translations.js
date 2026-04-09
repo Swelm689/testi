@@ -4402,5 +4402,63 @@
   }
 })();
 
+(function applyHeygenUtilityTranslations() {
+  if (!window.TRANSLATIONS) return;
+  const english = {
+    tools_tab_heygen: "Heygen",
+    tools_label_source_video: "Source Video",
+    tools_heygen_idle_hint: "MP4, MOV, WebM",
+    tools_heygen_ready_hint: "Source video is ready for translation.",
+    tools_heygen_label_output_language: "Target Language",
+    tools_heygen_label_speaker_num: "Speaker Count",
+    tools_heygen_label_translate_audio_only: "Translate Audio Only",
+    tools_heygen_label_dynamic_duration: "Dynamic Duration",
+    tools_heygen_speaker_placeholder: "Auto-detect",
+    tools_heygen_button: "Translate Video",
+    tools_heygen_note_precision: "Extreme-precision video translation with lip-sync aware dubbing and optional voice-only translation.",
+    tools_heygen_error_language: "Select a target language.",
+    tools_help_source_video: "Upload the video you want to translate. MP4, MOV, and WebM are the safest formats for this tool.",
+    tools_help_heygen_output_language: "Choose the language the translated video should speak in. The full Heygen-supported language list is available here, and the default is Russian.",
+    tools_help_heygen_translate_audio_only: "Translates only the voice track and ignores facial translation. Use this when you want dubbed audio without face-driven changes.",
+    tools_help_heygen_speaker_num: "Optional speaker count hint for multi-speaker videos. Leave it empty to let the model infer the count automatically.",
+    tools_help_heygen_dynamic_duration: "Lets the translated result adapt timing slightly to sound more natural across languages with different speaking speeds.",
+  };
+  const russian = {
+    tools_tab_heygen: "Heygen",
+    tools_label_source_video: "Исходное видео",
+    tools_heygen_idle_hint: "MP4, MOV, WebM",
+    tools_heygen_ready_hint: "Видеоисточник готов к переводу.",
+    tools_heygen_label_output_language: "Целевой язык",
+    tools_heygen_label_speaker_num: "Количество спикеров",
+    tools_heygen_label_translate_audio_only: "Переводить только аудио",
+    tools_heygen_label_dynamic_duration: "Динамическая длительность",
+    tools_heygen_speaker_placeholder: "Определить автоматически",
+    tools_heygen_button: "Перевести видео",
+    tools_heygen_note_precision: "Высокоточный перевод видео с учётом липсинка и возможностью перевода только голосовой дорожки.",
+    tools_heygen_error_language: "Выберите целевой язык.",
+    tools_help_source_video: "Загрузите видео, которое нужно перевести. Для этого инструмента самые безопасные форматы: MP4, MOV и WebM.",
+    tools_help_heygen_output_language: "Выберите язык, на котором должен говорить переведённый ролик. Здесь доступен полный список языков Heygen, по умолчанию выбран русский.",
+    tools_help_heygen_translate_audio_only: "Переводит только голосовую дорожку и игнорирует перевод лица. Подходит, если вам нужен дубляж без лицевой адаптации.",
+    tools_help_heygen_speaker_num: "Необязательная подсказка о количестве спикеров для видео с несколькими голосами. Оставьте поле пустым, чтобы модель определила это сама.",
+    tools_help_heygen_dynamic_duration: "Позволяет результату слегка подстраивать тайминг, чтобы перевод звучал естественнее в языках с другой скоростью речи.",
+  };
+  const localeValues = {
+    en: english,
+    es: english,
+    zh: english,
+    ar: english,
+    fr: english,
+    ru: { ...english, ...russian },
+    pt: english,
+    de: english,
+    ja: english,
+    ko: english,
+  };
+  for (const [locale, entries] of Object.entries(localeValues)) {
+    if (!window.TRANSLATIONS[locale]) continue;
+    Object.assign(window.TRANSLATIONS[locale], entries);
+  }
+})();
+
 
 

@@ -823,6 +823,10 @@
                                 <i data-lucide="audio-lines"></i>
                                 <span data-i18n="tools_tab_sam_audio">SAM Audio</span>
                             </button>
+                            <button type="button" class="tools-suite-tab" data-tools-tool="heygen-translate" onclick="switchToolsTool('heygen-translate')">
+                                <i data-lucide="languages"></i>
+                                <span data-i18n="tools_tab_heygen">Heygen</span>
+                            </button>
                         </div>
 
                         <div id="toolsCardStudioWorkspace" class="tools-workspace tools-workspace-active">
@@ -1271,6 +1275,38 @@
                             </div>
                             <button type="button" class="generate-btn tools-utility-generate tools-utility-generate-audio" onclick="handleGenerate()">
                                 <i data-lucide="audio-lines"></i><span data-i18n="tools_sam_audio_button">Separate Audio</span>
+                            </button>
+                        </div>
+
+                        <div id="toolsHeygenWorkspace" class="tools-workspace tools-workspace-utility" style="display:none;">
+                            <label class="group-label tools-setting-head"><span data-i18n="tools_label_source_video">Source Video</span><button type="button" class="tools-help-btn" data-help-key="sourceVideo" aria-expanded="false">?</button></label>
+                            <div class="upload-zone tools-utility-drop" id="toolsUtilityVideoDropzone" onclick="document.getElementById('toolsUtilityVideoInput').click()">
+                                <div class="wiz-drop-icon"><i data-lucide="video"></i></div>
+                                <span class="wiz-drop-text" id="toolsUtilityVideoLabel" data-i18n="upload_video">Upload video</span>
+                                <span class="wiz-drop-hint" id="toolsUtilityVideoHint" data-i18n="tools_heygen_idle_hint">MP4, MOV, WebM</span>
+                                <input type="file" id="toolsUtilityVideoInput" accept="video/*" hidden>
+                            </div>
+                            <div class="settings-grid" style="margin-top:0.6rem;">
+                                <div class="field full-width" id="toolsHeygenOutputLanguageField">
+                                    <label class="tools-setting-head"><span data-i18n="tools_heygen_label_output_language">Target Language</span><button type="button" class="tools-help-btn" data-help-key="heygen_output_language" aria-expanded="false">?</button></label>
+                                    <select id="toolsHeygenOutputLanguage"></select>
+                                </div>
+                                <div class="tools-enhancer-model-note full-width" id="toolsHeygenModelNote"></div>
+                                <div class="field" id="toolsHeygenSpeakerNumField">
+                                    <label class="tools-setting-head"><span data-i18n="tools_heygen_label_speaker_num">Speaker Count</span><button type="button" class="tools-help-btn" data-help-key="heygen_speaker_num" aria-expanded="false">?</button></label>
+                                    <input type="number" id="toolsHeygenSpeakerNum" min="1" step="1" data-i18n-placeholder="tools_heygen_speaker_placeholder" placeholder="Auto-detect">
+                                </div>
+                                <label class="tools-utility-toggle field full-width" id="toolsHeygenTranslateAudioOnlyField" for="toolsHeygenTranslateAudioOnly">
+                                    <span class="tools-toggle-copy"><span data-i18n="tools_heygen_label_translate_audio_only">Translate Audio Only</span><button type="button" class="tools-help-btn" data-help-key="heygen_translate_audio_only" aria-expanded="false">?</button></span>
+                                    <input type="checkbox" id="toolsHeygenTranslateAudioOnly">
+                                </label>
+                                <label class="tools-utility-toggle field full-width" id="toolsHeygenDynamicDurationField" for="toolsHeygenEnableDynamicDuration">
+                                    <span class="tools-toggle-copy"><span data-i18n="tools_heygen_label_dynamic_duration">Dynamic Duration</span><button type="button" class="tools-help-btn" data-help-key="heygen_dynamic_duration" aria-expanded="false">?</button></span>
+                                    <input type="checkbox" id="toolsHeygenEnableDynamicDuration" checked>
+                                </label>
+                            </div>
+                            <button type="button" class="generate-btn tools-utility-generate tools-utility-generate-video" onclick="handleGenerate()">
+                                <i data-lucide="languages"></i><span data-i18n="tools_heygen_button">Translate Video</span>
                             </button>
                         </div>
                     </div>

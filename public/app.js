@@ -308,6 +308,7 @@ let uploadedKling3RefImages = [];
 let uploadedToolsImages = [];
 let uploadedToolsUtilityImage = null;
 let uploadedToolsUtilityAudio = null;
+let uploadedToolsUtilityVideo = null;
 const managedUploadRemoteState = Object.create(null);
 let toolsCharsCount = 0;
 let currentToolsTool = 'card-studio';
@@ -321,17 +322,49 @@ let kling3LastTabByFamily = { v3: 'v3-text-to-video', o3: 'o3-text-to-video' };
 let kling3ControlsInitialized = false;
 let ltx23SelectedModelByFamily = {};
 
-const TOOLS_TOOL_IDS = new Set(['card-studio', 'enhancer', 'background-removal', 'sam-audio']);
+const TOOLS_TOOL_IDS = new Set(['card-studio', 'enhancer', 'background-removal', 'sam-audio', 'heygen-translate']);
 const TOOLS_TOOL_MODEL_IDS = {
   'card-studio': null,
   enhancer: 'fal-ai/topaz/upscale/image',
   'background-removal': 'pixelcut/background-removal',
   'sam-audio': 'fal-ai/sam-audio/separate',
+  'heygen-translate': 'fal-ai/heygen/v2/translate/precision',
 };
 const SAM_AUDIO_MODEL_NOTES = {
   'fal-ai/sam-audio/separate': 'tools_sam_audio_note_separate',
   'fal-ai/sam-audio/span-separate': 'tools_sam_audio_note_span',
 };
+const HEYGEN_TRANSLATE_DEFAULT_LANGUAGE = 'Russian';
+const HEYGEN_TRANSLATE_LANGUAGES = [
+  'English', 'Spanish', 'French', 'Hindi', 'Italian', 'German', 'Polish', 'Portuguese', 'Chinese', 'Japanese', 'Dutch', 'Turkish', 'Korean',
+  'Danish', 'Arabic', 'Romanian', 'Mandarin', 'Filipino', 'Swedish', 'Indonesian', 'Ukrainian', 'Greek', 'Czech', 'Bulgarian', 'Malay',
+  'Slovak', 'Croatian', 'Tamil', 'Finnish', 'Russian', 'Afrikaans (South Africa)', 'Albanian (Albania)', 'Amharic (Ethiopia)',
+  'Arabic (Algeria)', 'Arabic (Bahrain)', 'Arabic (Egypt)', 'Arabic (Iraq)', 'Arabic (Jordan)', 'Arabic (Kuwait)', 'Arabic (Lebanon)',
+  'Arabic (Libya)', 'Arabic (Morocco)', 'Arabic (Oman)', 'Arabic (Qatar)', 'Arabic (Saudi Arabia)', 'Arabic (Syria)', 'Arabic (Tunisia)',
+  'Arabic (United Arab Emirates)', 'Arabic (Yemen)', 'Armenian (Armenia)', 'Azerbaijani (Latin, Azerbaijan)', 'Bangla (Bangladesh)', 'Basque',
+  'Bengali (India)', 'Bosnian (Bosnia and Herzegovina)', 'Bulgarian (Bulgaria)', 'Burmese (Myanmar)', 'Catalan', 'Chinese (Cantonese, Traditional)',
+  'Chinese (Jilu Mandarin, Simplified)', 'Chinese (Mandarin, Simplified)', 'Chinese (Northeastern Mandarin, Simplified)',
+  'Chinese (Southwestern Mandarin, Simplified)', 'Chinese (Taiwanese Mandarin, Traditional)', 'Chinese (Wu, Simplified)',
+  'Chinese (Zhongyuan Mandarin Henan, Simplified)', 'Chinese (Zhongyuan Mandarin Shaanxi, Simplified)', 'Croatian (Croatia)',
+  'Czech (Czechia)', 'Danish (Denmark)', 'Dutch (Belgium)', 'Dutch (Netherlands)', 'English (Australia)', 'English (Canada)',
+  'English (Hong Kong SAR)', 'English (India)', 'English (Ireland)', 'English (Kenya)', 'English (New Zealand)', 'English (Nigeria)',
+  'English (Philippines)', 'English (Singapore)', 'English (South Africa)', 'English (Tanzania)', 'English (UK)', 'English (United States)',
+  'Estonian (Estonia)', 'Filipino (Philippines)', 'Finnish (Finland)', 'French (Belgium)', 'French (Canada)', 'French (France)',
+  'French (Switzerland)', 'Galician', 'Georgian (Georgia)', 'German (Austria)', 'German (Germany)', 'German (Switzerland)', 'Greek (Greece)',
+  'Gujarati (India)', 'Hebrew (Israel)', 'Hindi (India)', 'Hungarian (Hungary)', 'Icelandic (Iceland)', 'Indonesian (Indonesia)', 'Irish (Ireland)',
+  'Italian (Italy)', 'Japanese (Japan)', 'Javanese (Latin, Indonesia)', 'Kannada (India)', 'Kazakh (Kazakhstan)', 'Khmer (Cambodia)',
+  'Korean (Korea)', 'Lao (Laos)', 'Latvian (Latvia)', 'Lithuanian (Lithuania)', 'Macedonian (North Macedonia)', 'Malay (Malaysia)',
+  'Malayalam (India)', 'Maltese (Malta)', 'Marathi (India)', 'Mongolian (Mongolia)', 'Nepali (Nepal)', 'Norwegian Bokmål (Norway)',
+  'Pashto (Afghanistan)', 'Persian (Iran)', 'Polish (Poland)', 'Portuguese (Brazil)', 'Portuguese (Portugal)', 'Romanian (Romania)',
+  'Russian (Russia)', 'Serbian (Latin, Serbia)', 'Sinhala (Sri Lanka)', 'Slovak (Slovakia)', 'Slovenian (Slovenia)', 'Somali (Somalia)',
+  'Spanish (Argentina)', 'Spanish (Bolivia)', 'Spanish (Chile)', 'Spanish (Colombia)', 'Spanish (Costa Rica)', 'Spanish (Cuba)',
+  'Spanish (Dominican Republic)', 'Spanish (Ecuador)', 'Spanish (El Salvador)', 'Spanish (Equatorial Guinea)', 'Spanish (Guatemala)',
+  'Spanish (Honduras)', 'Spanish (Mexico)', 'Spanish (Nicaragua)', 'Spanish (Panama)', 'Spanish (Paraguay)', 'Spanish (Peru)',
+  'Spanish (Puerto Rico)', 'Spanish (Spain)', 'Spanish (United States)', 'Spanish (Uruguay)', 'Spanish (Venezuela)', 'Sundanese (Indonesia)',
+  'Swahili (Kenya)', 'Swahili (Tanzania)', 'Swedish (Sweden)', 'Tamil (India)', 'Tamil (Malaysia)', 'Tamil (Singapore)', 'Tamil (Sri Lanka)',
+  'Telugu (India)', 'Thai (Thailand)', 'Turkish (Türkiye)', 'Ukrainian (Ukraine)', 'Urdu (India)', 'Urdu (Pakistan)', 'Uzbek (Latin, Uzbekistan)',
+  'Vietnamese (Vietnam)', 'Welsh (United Kingdom)', 'Zulu (South Africa)', 'English - Your Accent', 'English - American Accent'
+];
 const TOPAZ_SUBJECT_MODELS = new Set(['Standard V2', 'Recovery V2']);
 const TOPAZ_FACE_MODELS = new Set(['Standard V2', 'Recovery V2']);
 const TOPAZ_SHARPEN_DENOISE_MODELS = new Set(['Standard V2', 'Low Resolution V2', 'CGI', 'High Fidelity V2', 'Text Refine', 'Redefine']);
@@ -350,6 +383,7 @@ const TOPAZ_MODEL_NOTES = {
 };
 const TOPAZ_HELP_TEXT = {
   sourceImage: 'tools_help_source_image',
+  sourceVideo: 'tools_help_source_video',
   model: 'tools_help_model',
   upscale_factor: 'tools_help_upscale_factor',
   output_format: 'tools_help_output_format',
@@ -381,6 +415,10 @@ const TOPAZ_HELP_TEXT = {
   sam_audio_use_sound_activity_ranking: 'tools_help_sam_audio_sound_activity_ranking',
   sam_audio_trim_to_span: 'tools_help_sam_audio_trim_to_span',
   sam_audio_output_format: 'tools_help_sam_audio_output_format',
+  heygen_output_language: 'tools_help_heygen_output_language',
+  heygen_translate_audio_only: 'tools_help_heygen_translate_audio_only',
+  heygen_speaker_num: 'tools_help_heygen_speaker_num',
+  heygen_dynamic_duration: 'tools_help_heygen_dynamic_duration',
 };
 const TOPAZ_RANGE_CONTROLS = [
   { inputId: 'toolsEnhancerUpscaleFactor', rangeId: 'toolsEnhancerUpscaleFactorRange', min: 1, max: 4, step: 0.1, precision: 1 },
@@ -431,6 +469,11 @@ const TOPAZ_HELP_TARGETS = [
   { key: 'sam_audio_chunk_overlap', selector: '#toolsSamAudioChunkOverlapField > label' },
   { key: 'sam_audio_use_sound_activity_ranking', selector: '#toolsSamAudioUseSoundActivityRanking', placement: 'toggle' },
   { key: 'sam_audio_trim_to_span', selector: '#toolsSamAudioTrimToSpan', placement: 'toggle' },
+  { key: 'sourceVideo', selector: '#toolsHeygenWorkspace .group-label', placement: 'group' },
+  { key: 'heygen_output_language', selector: '#toolsHeygenOutputLanguageField > label' },
+  { key: 'heygen_speaker_num', selector: '#toolsHeygenSpeakerNumField > label' },
+  { key: 'heygen_translate_audio_only', selector: '#toolsHeygenTranslateAudioOnly', placement: 'toggle' },
+  { key: 'heygen_dynamic_duration', selector: '#toolsHeygenDynamicDuration', placement: 'toggle' },
 ];
 let activeToolsHelpButton = null;
 let toolsHelpPopoverEl = null;
@@ -1267,6 +1310,7 @@ const ASSET_TARGETS = {
   video: [
     { label: 'Video → Video Input', i18nKey: 'asset_video_input', mode: 'video', inputId: 'videoInput', videoTab: 'video-to-video' },
     { label: 'Kling3 → Video Input', i18nKey: 'asset_kling3_video', mode: 'video', inputId: 'kling3VideoInput', videoTab: 'video-to-video', kling3Tab: 'video-to-video' },
+    { label: 'Tools → Heygen Translate', mode: 'tools', inputId: 'toolsUtilityVideoInput', toolsTool: 'heygen-translate' },
   ],
   audio: [
     { label: 'Video → Audio Input', mode: 'video', inputId: 'audioInput', videoTab: 'audio-to-video' },
@@ -1430,6 +1474,7 @@ const MANAGED_UPLOADS = {
   audioInput: { labelId: 'audioFileLabel', emptyKey: 'select_audio', kind: 'audio', multiple: false, showFileName: true, getFiles: () => uploadedAudioFile ? [uploadedAudioFile] : [], setFiles: (next) => { uploadedAudioFile = next || null; } },
   toolsUtilityImageInput: { labelId: 'toolsUtilityImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedToolsUtilityImage ? [uploadedToolsUtilityImage] : [], setFiles: (next) => { uploadedToolsUtilityImage = next || null; } },
   toolsUtilityAudioInput: { labelId: 'toolsUtilityAudioLabel', emptyKey: 'select_audio', kind: 'audio', multiple: false, showFileName: true, getFiles: () => uploadedToolsUtilityAudio ? [uploadedToolsUtilityAudio] : [], setFiles: (next) => { uploadedToolsUtilityAudio = next || null; } },
+  toolsUtilityVideoInput: { labelId: 'toolsUtilityVideoLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: false, showFileName: true, getFiles: () => uploadedToolsUtilityVideo ? [uploadedToolsUtilityVideo] : [], setFiles: (next) => { uploadedToolsUtilityVideo = next || null; } },
   kling3StartImageInput: { labelId: 'kling3StartImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3StartImage ? [uploadedKling3StartImage] : [], setFiles: (next) => { uploadedKling3StartImage = next || null; } },
   kling3EndImageInput: { labelId: 'kling3EndImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedKling3EndImage ? [uploadedKling3EndImage] : [], setFiles: (next) => { uploadedKling3EndImage = next || null; } },
   kling3VideoInput: { labelId: 'kling3VideoLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: false, remoteUrlInputId: 'kling3VideoUrlInput', getFiles: () => uploadedKling3Video ? [uploadedKling3Video] : [], setFiles: (next) => { uploadedKling3Video = next || null; } },
@@ -1699,7 +1744,7 @@ function refreshManagedUploadUi(inputEl) {
   const labelEl = config.labelId ? qs(config.labelId) : null;
   if (labelEl) labelEl.textContent = getManagedUploadLabel(config, files);
   renderCompactPreviewForInput(inputEl, config);
-  if (inputEl.id === 'toolsUtilityImageInput' || inputEl.id === 'toolsUtilityAudioInput') refreshToolsUtilitySourceUi();
+  if (inputEl.id === 'toolsUtilityImageInput' || inputEl.id === 'toolsUtilityAudioInput' || inputEl.id === 'toolsUtilityVideoInput') refreshToolsUtilitySourceUi();
 }
 
 function bindManagedUploadInput(inputEl, config) {
@@ -2114,6 +2159,7 @@ async function reuseFromHistory(index) {
       restoreToolsSamAudioSpanState(ctx.samAudioSpans);
     }
     updateToolsSamAudioUi();
+    updateToolsHeygenUi();
     refreshToolsUtilitySourceUi();
   }
   if (normalizedMode === 'video') {
@@ -4938,12 +4984,17 @@ function getToolsUtilityAudioSource() {
   return getManagedUploadPrimarySource(MANAGED_UPLOADS.toolsUtilityAudioInput, uploadedToolsUtilityAudio);
 }
 
+function getToolsUtilityVideoSource() {
+  return getManagedUploadPrimarySource(MANAGED_UPLOADS.toolsUtilityVideoInput, uploadedToolsUtilityVideo);
+}
+
 function getActiveToolsModelId() {
   if (currentToolsTool === 'enhancer') return TOOLS_TOOL_MODEL_IDS.enhancer;
   if (currentToolsTool === 'background-removal') return TOOLS_TOOL_MODEL_IDS['background-removal'];
   if (currentToolsTool === 'sam-audio') {
     return qs('toolsSamAudioModel') ? qs('toolsSamAudioModel').value : TOOLS_TOOL_MODEL_IDS['sam-audio'];
   }
+  if (currentToolsTool === 'heygen-translate') return TOOLS_TOOL_MODEL_IDS['heygen-translate'];
   return qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
 }
 
@@ -4987,6 +5038,19 @@ function refreshToolsUtilitySourceUi() {
   }
   const audioZone = qs('toolsUtilityAudioDropzone');
   if (audioZone) audioZone.classList.toggle('is-loaded', !!audioSource);
+
+  const videoConfig = MANAGED_UPLOADS.toolsUtilityVideoInput;
+  const videoSource = getToolsUtilityVideoSource();
+  const videoLabel = qs('toolsUtilityVideoLabel');
+  if (videoLabel) videoLabel.textContent = getManagedUploadLabel(videoConfig, getManagedUploadFiles(videoConfig));
+  const videoHint = qs('toolsUtilityVideoHint');
+  if (videoHint) {
+    videoHint.textContent = videoSource
+      ? toolsUiText('tools_heygen_ready_hint', 'Source video is ready for translation.')
+      : toolsUiText('tools_heygen_idle_hint', 'MP4, MOV, WebM');
+  }
+  const videoZone = qs('toolsUtilityVideoDropzone');
+  if (videoZone) videoZone.classList.toggle('is-loaded', !!videoSource);
 }
 
 function clampEnhancerValue(value, meta) {
@@ -5383,6 +5447,39 @@ function updateToolsSamAudioUi() {
   TOPAZ_RANGE_CONTROLS.forEach((meta) => syncEnhancerRangeControl(meta, 'input', false));
 }
 
+function populateHeygenLanguageOptions() {
+  const select = qs('toolsHeygenOutputLanguage');
+  if (!select) return;
+  const preferred = String(select.dataset.pendingValue || select.value || HEYGEN_TRANSLATE_DEFAULT_LANGUAGE || '').trim();
+  select.innerHTML = '';
+  HEYGEN_TRANSLATE_LANGUAGES.forEach((language) => {
+    const option = document.createElement('option');
+    option.value = language;
+    option.textContent = language;
+    select.appendChild(option);
+  });
+  select.value = HEYGEN_TRANSLATE_LANGUAGES.includes(preferred) ? preferred : HEYGEN_TRANSLATE_DEFAULT_LANGUAGE;
+  delete select.dataset.pendingValue;
+}
+
+function updateToolsHeygenUi() {
+  populateHeygenLanguageOptions();
+  const noteEl = qs('toolsHeygenModelNote');
+  if (noteEl) {
+    noteEl.textContent = toolsUiText(
+      'tools_heygen_note_precision',
+      'Extreme-precision video translation with lip-sync aware dubbing and optional voice-only translation.',
+    );
+  }
+
+  if (activeToolsHelpButton) {
+    const hiddenField = activeToolsHelpButton.closest('.field, .tools-utility-toggle, .group-label');
+    if (!document.body.contains(activeToolsHelpButton) || (hiddenField && hiddenField.offsetParent === null)) {
+      closeToolsHelpPopover();
+    }
+  }
+}
+
 function switchToolsTool(tool, options = {}) {
   const nextTool = TOOLS_TOOL_IDS.has(tool) ? tool : 'card-studio';
   if (!options.force && currentToolsTool === nextTool) {
@@ -5403,6 +5500,7 @@ function switchToolsTool(tool, options = {}) {
     enhancer: qs('toolsEnhancerWorkspace'),
     'background-removal': qs('toolsBgRemovalWorkspace'),
     'sam-audio': qs('toolsSamAudioWorkspace'),
+    'heygen-translate': qs('toolsHeygenWorkspace'),
   };
 
   Object.entries(workspaces).forEach(([id, el]) => {
@@ -5421,6 +5519,7 @@ function switchToolsTool(tool, options = {}) {
 
   updateToolsEnhancerUi();
   updateToolsSamAudioUi();
+  updateToolsHeygenUi();
   refreshToolsUtilitySourceUi();
   if (!options.skipSave) saveAppState();
   requestAnimationFrame(() => {
@@ -5434,22 +5533,27 @@ window.switchToolsTool = switchToolsTool;
 function initToolsUtilityControls() {
   const utilityInput = qs('toolsUtilityImageInput');
   const utilityAudioInput = qs('toolsUtilityAudioInput');
-  if (!utilityInput || !utilityAudioInput || utilityInput._toolsUtilityBound) {
+  const utilityVideoInput = qs('toolsUtilityVideoInput');
+  if (!utilityInput || !utilityAudioInput || !utilityVideoInput || utilityInput._toolsUtilityBound) {
     initTopazHelpButtons();
     initToolsEnhancerRanges();
     refreshToolsUtilitySourceUi();
     updateToolsEnhancerUi();
     updateToolsSamAudioUi();
+    updateToolsHeygenUi();
     return;
   }
 
   utilityInput._toolsUtilityBound = true;
   utilityAudioInput._toolsUtilityBound = true;
+  utilityVideoInput._toolsUtilityBound = true;
   bindManagedUploadById('toolsUtilityImageInput');
   bindManagedUploadById('toolsUtilityAudioInput');
+  bindManagedUploadById('toolsUtilityVideoInput');
   setupDropZone(qs('toolsUtilityImageDropzone'), utilityInput);
   setupDropZone(qs('toolsBgRemovalDropzone'), utilityInput);
   setupDropZone(qs('toolsUtilityAudioDropzone'), utilityAudioInput);
+  setupDropZone(qs('toolsUtilityVideoDropzone'), utilityVideoInput);
 
   const enhancerModel = qs('toolsEnhancerModel');
   if (enhancerModel) enhancerModel.addEventListener('change', () => {
@@ -5477,6 +5581,7 @@ function initToolsUtilityControls() {
   refreshToolsUtilitySourceUi();
   updateToolsEnhancerUi();
   updateToolsSamAudioUi();
+  updateToolsHeygenUi();
 }
 
 function initToolsControls() {
@@ -6980,6 +7085,38 @@ async function submitToolsRequest(task) {
     });
     if (!samRes.ok) throw await createResponseError(samRes, 'SAM Audio separation failed');
     return await samRes.json();
+  }
+
+  if (task && task.toolsTool === 'heygen-translate') {
+    const videoSource = getToolsUtilityVideoSource();
+    const videoUrl = await resolveUploadItemUrl(videoSource, 'tools-heygen-video', task);
+    if (!videoUrl) throw new Error(window.I18N ? I18N.t('upload_video') : 'Upload video');
+
+    const outputLanguage = qs('toolsHeygenOutputLanguage')
+      ? String(qs('toolsHeygenOutputLanguage').value || '').trim()
+      : HEYGEN_TRANSLATE_DEFAULT_LANGUAGE;
+    if (!outputLanguage) throw new Error(toolsUiText('tools_heygen_error_language', 'Select a target language.'));
+
+    const speakerValue = qs('toolsHeygenSpeakerNum') ? String(qs('toolsHeygenSpeakerNum').value || '').trim() : '';
+    const body = {
+      model_id: TOOLS_TOOL_MODEL_IDS['heygen-translate'],
+      video_url: videoUrl,
+      output_language: outputLanguage,
+      translate_audio_only: !!(qs('toolsHeygenTranslateAudioOnly') && qs('toolsHeygenTranslateAudioOnly').checked),
+      enable_dynamic_duration: !(qs('toolsHeygenEnableDynamicDuration') && !qs('toolsHeygenEnableDynamicDuration').checked),
+    };
+    if (speakerValue) {
+      const speakerNum = Math.max(1, Math.round(Number(speakerValue) || 1));
+      body.speaker_num = speakerNum;
+    }
+
+    const heygenRes = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!heygenRes.ok) throw await createResponseError(heygenRes, 'Heygen translation failed');
+    return await heygenRes.json();
   }
 
   const modelId = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
@@ -10038,6 +10175,33 @@ async function pollTask(taskId) {
           addToHistory(item);
           displayResult(item);
         }
+      } else if (t.mode === 'tools' && t.toolsTool === 'heygen-translate') {
+        const translatedVideoUrl = extractMediaUrl(out, 'video');
+        if (!translatedVideoUrl) throw new Error('No translated video URL in response');
+        t.status = 'COMPLETED';
+        t.completedAt = Date.now();
+        t.mediaUrl = translatedVideoUrl;
+
+        if (!t.savedToHistory) {
+          const outputLanguage = qs('toolsHeygenOutputLanguage')
+            ? String(qs('toolsHeygenOutputLanguage').value || '').trim()
+            : HEYGEN_TRANSLATE_DEFAULT_LANGUAGE;
+          const item = buildTaskHistoryItem(t, 'video', translatedVideoUrl, {
+            suffix: 'heygen_video',
+            timestamp: t.completedAt,
+            meta: {
+              outputLanguage,
+              translateAudioOnly: !!(qs('toolsHeygenTranslateAudioOnly') && qs('toolsHeygenTranslateAudioOnly').checked),
+              speakerNum: qs('toolsHeygenSpeakerNum') ? (String(qs('toolsHeygenSpeakerNum').value || '').trim() || null) : null,
+              enableDynamicDuration: !(qs('toolsHeygenEnableDynamicDuration') && !qs('toolsHeygenEnableDynamicDuration').checked),
+              sourceTool: 'heygen-translate',
+            },
+          });
+          t.savedToHistory = true;
+          addToHistory(item);
+          displayResult(item);
+          queueHistoryThumbnailForItem(item, 0);
+        }
       } else {
         const isVideoMode = t.mode === 'video' || t.mode === 'kling3';
         const urls = extractAllMediaUrls(out, isVideoMode ? 'video' : 'image');
@@ -10209,6 +10373,12 @@ async function handleGenerate() {
         ? toolsUiText('tools_sam_audio_model_span', 'Span Separation')
         : toolsUiText('tools_sam_audio_model_separate', 'Prompt Separation');
       prompt = `SAM Audio · ${label}${promptValue ? ` · ${promptValue}` : ''}`;
+    } else if (currentToolsTool === 'heygen-translate') {
+      const outputLanguage = qs('toolsHeygenOutputLanguage')
+        ? String(qs('toolsHeygenOutputLanguage').value || '').trim()
+        : HEYGEN_TRANSLATE_DEFAULT_LANGUAGE;
+      const audioOnly = !!(qs('toolsHeygenTranslateAudioOnly') && qs('toolsHeygenTranslateAudioOnly').checked);
+      prompt = `Heygen Translate · ${outputLanguage || HEYGEN_TRANSLATE_DEFAULT_LANGUAGE}${audioOnly ? ' · Voice Only' : ''}`;
     } else {
       const format = qs('toolsBgOutputFormat') ? qs('toolsBgOutputFormat').value : 'rgba';
       prompt = `Background Removal · ${format}`;
@@ -10328,6 +10498,18 @@ async function handleGenerate() {
       }
       if (modelId === 'fal-ai/sam-audio/span-separate' && !collectToolsSamAudioSpans().length) {
         showToast(toolsUiText('tools_sam_audio_error_spans', 'Add at least one valid span.'), 'error');
+        return;
+      }
+    } else if (currentToolsTool === 'heygen-translate') {
+      const outputLanguage = qs('toolsHeygenOutputLanguage')
+        ? String(qs('toolsHeygenOutputLanguage').value || '').trim()
+        : '';
+      if (!getToolsUtilityVideoSource()) {
+        showToast(window.I18N ? I18N.t('upload_video') : 'Upload video', 'error');
+        return;
+      }
+      if (!outputLanguage) {
+        showToast(toolsUiText('tools_heygen_error_language', 'Select a target language.'), 'error');
         return;
       }
     }
@@ -10517,10 +10699,28 @@ function initTasks() {
         changed = true;
       }
       if (t.mode !== '3d' && t.mediaUrl) {
-        const item = buildTaskHistoryItem(t, t.mode === 'video' ? 'video' : 'image', t.mediaUrl, {
-          suffix: t.mode === 'video' ? 'video' : 'image',
+        const isToolsSamAudio = t.mode === 'tools' && t.toolsTool === 'sam-audio';
+        const isToolsHeygen = t.mode === 'tools' && t.toolsTool === 'heygen-translate';
+        const itemType = isToolsSamAudio ? 'audio' : ((t.mode === 'video' || isToolsHeygen) ? 'video' : 'image');
+        const item = buildTaskHistoryItem(t, itemType, t.mediaUrl, {
+          suffix: itemType,
           timestamp: t.completedAt || Date.now(),
+          meta: isToolsSamAudio ? {
+            residualUrl: t.secondaryMediaUrl || null,
+            outputFormat: qs('toolsSamAudioOutputFormat') ? qs('toolsSamAudioOutputFormat').value : 'wav',
+            previewUrl: createAudioPlaceholderDataUrl('AUDIO'),
+          } : (isToolsHeygen ? {
+            outputLanguage: qs('toolsHeygenOutputLanguage') ? String(qs('toolsHeygenOutputLanguage').value || '').trim() : HEYGEN_TRANSLATE_DEFAULT_LANGUAGE,
+            translateAudioOnly: !!(qs('toolsHeygenTranslateAudioOnly') && qs('toolsHeygenTranslateAudioOnly').checked),
+            speakerNum: qs('toolsHeygenSpeakerNum') ? (String(qs('toolsHeygenSpeakerNum').value || '').trim() || null) : null,
+            enableDynamicDuration: !(qs('toolsHeygenEnableDynamicDuration') && !qs('toolsHeygenEnableDynamicDuration').checked),
+            sourceTool: 'heygen-translate',
+          } : {}),
         });
+        if (isToolsSamAudio) {
+          item.thumbnailUrl = createAudioPlaceholderDataUrl('AUDIO');
+          item.residualUrl = t.secondaryMediaUrl || null;
+        }
         t.savedToHistory = true;
         addToHistory(item);
         changed = true;
@@ -10640,8 +10840,10 @@ async function wizIdbSaveImages() {
     const inspoArr = await Promise.all(uploadedInspoImages.map(toB64));
     const utilitySource = getToolsUtilitySource();
     const utilityAudioSource = getToolsUtilityAudioSource();
+    const utilityVideoSource = getToolsUtilityVideoSource();
     const utilityItem = utilitySource ? await toB64(utilitySource) : null;
     const utilityAudioItem = utilityAudioSource ? await toB64(utilityAudioSource) : null;
+    const utilityVideoItem = isRemoteAssetItem(utilityVideoSource) ? await toB64(utilityVideoSource) : null;
     const db = await _wizIdbOpen();
     const tx = db.transaction('files', 'readwrite');
     const store = tx.objectStore('files');
@@ -10649,6 +10851,7 @@ async function wizIdbSaveImages() {
     store.put(inspoArr, 'inspoImages');
     store.put(utilityItem, 'utilityImage');
     store.put(utilityAudioItem, 'utilityAudio');
+    store.put(utilityVideoItem, 'utilityVideo');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
     db.close();
   } catch (e) { console.warn('IDB save failed', e); }
@@ -10657,15 +10860,16 @@ async function wizIdbRestoreImages() {
   try {
     const db = await _wizIdbOpen();
     // Issue BOTH requests synchronously before any await to keep the transaction active
-    const [prodArr, inspoArr, utilityItem, utilityAudioItem] = await new Promise((resolve, reject) => {
+    const [prodArr, inspoArr, utilityItem, utilityAudioItem, utilityVideoItem] = await new Promise((resolve, reject) => {
       const tx = db.transaction('files', 'readonly');
       const store = tx.objectStore('files');
       const prodReq = store.get('productImages');
       const inspoReq = store.get('inspoImages');
       const utilityReq = store.get('utilityImage');
       const utilityAudioReq = store.get('utilityAudio');
-      let prod, inspo, utility, utilityAudio, prodDone = false, inspoDone = false, utilityDone = false, utilityAudioDone = false;
-      const check = () => { if (prodDone && inspoDone && utilityDone && utilityAudioDone) resolve([prod, inspo, utility, utilityAudio]); };
+      const utilityVideoReq = store.get('utilityVideo');
+      let prod, inspo, utility, utilityAudio, utilityVideo, prodDone = false, inspoDone = false, utilityDone = false, utilityAudioDone = false, utilityVideoDone = false;
+      const check = () => { if (prodDone && inspoDone && utilityDone && utilityAudioDone && utilityVideoDone) resolve([prod, inspo, utility, utilityAudio, utilityVideo]); };
       prodReq.onsuccess  = () => { prod  = prodReq.result  || null; prodDone  = true; check(); };
       prodReq.onerror    = () => { prod  = null;                     prodDone  = true; check(); };
       inspoReq.onsuccess = () => { inspo = inspoReq.result || null; inspoDone = true; check(); };
@@ -10674,6 +10878,8 @@ async function wizIdbRestoreImages() {
       utilityReq.onerror   = () => { utility = null; utilityDone = true; check(); };
       utilityAudioReq.onsuccess = () => { utilityAudio = utilityAudioReq.result || null; utilityAudioDone = true; check(); };
       utilityAudioReq.onerror = () => { utilityAudio = null; utilityAudioDone = true; check(); };
+      utilityVideoReq.onsuccess = () => { utilityVideo = utilityVideoReq.result || null; utilityVideoDone = true; check(); };
+      utilityVideoReq.onerror = () => { utilityVideo = null; utilityVideoDone = true; check(); };
       tx.onerror = reject;
     });
     db.close();
@@ -10715,6 +10921,16 @@ async function wizIdbRestoreImages() {
     }
     const utilityAudioInput = qs('toolsUtilityAudioInput');
     if (utilityAudioInput && utilityAudioInput._uploadConfig) refreshManagedUploadUi(utilityAudioInput);
+    const restoredUtilityVideoSource = b64ToFile(utilityVideoItem);
+    if (isRemoteAssetItem(restoredUtilityVideoSource)) {
+      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityVideoInput, restoredUtilityVideoSource);
+      uploadedToolsUtilityVideo = null;
+    } else {
+      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityVideoInput, []);
+      uploadedToolsUtilityVideo = restoredUtilityVideoSource;
+    }
+    const utilityVideoInput = qs('toolsUtilityVideoInput');
+    if (utilityVideoInput && utilityVideoInput._uploadConfig) refreshManagedUploadUi(utilityVideoInput);
   } catch (e) { console.warn('IDB restore failed', e); }
 }
 
@@ -10737,6 +10953,7 @@ const PERSISTED_SELECTS = [
   'kling3Duration', 'kling3AspectRatio', 'kling3ShotType', 'kling3CfgScale',
   'kling3GenerateAudio', 'kling3KeepAudio',
   'kling3MotionOrientation', 'kling3KeepOriginalSound',
+  'toolsHeygenOutputLanguage',
   'aspectRatioBase',
   'toolsModel', 'toolsResolution', 'toolsAspectRatio', 'toolsWebSearch', 'toolsGoogleSearch',
   'toolsEnhancerModel', 'toolsEnhancerOutputFormat', 'toolsEnhancerSubjectDetection', 'toolsEnhancerCreativity', 'toolsEnhancerTexture',
@@ -10756,12 +10973,14 @@ const PERSISTED_INPUTS = [
   'toolsEnhancerSharpen', 'toolsEnhancerDenoise', 'toolsEnhancerFixCompression',
   'toolsEnhancerStrength', 'toolsEnhancerDetail', 'toolsEnhancerPrompt',
   'toolsSamAudioPrompt', 'toolsSamAudioRerankingCandidates', 'toolsSamAudioMaxChunkDuration', 'toolsSamAudioChunkOverlap',
+  'toolsHeygenSpeakerNum',
 ];
 
 const PERSISTED_CHECKBOXES = [
   'toolsInspoMatchBg',
   'toolsEnhancerCropToFill', 'toolsEnhancerFaceEnhancement', 'toolsEnhancerAutoprompt',
   'toolsSamAudioPredictSpans', 'toolsSamAudioUseSoundActivityRanking', 'toolsSamAudioTrimToSpan',
+  'toolsHeygenTranslateAudioOnly', 'toolsHeygenEnableDynamicDuration',
 ];
 
 function saveAppState() {
@@ -10827,6 +11046,10 @@ function restoreAppState() {
             el.value = el.options[0].value;
           }
         }
+      }
+      const heygenLanguageSelect = qs('toolsHeygenOutputLanguage');
+      if (heygenLanguageSelect && state.selects.toolsHeygenOutputLanguage) {
+        heygenLanguageSelect.dataset.pendingValue = String(state.selects.toolsHeygenOutputLanguage);
       }
     }
 
@@ -10911,6 +11134,7 @@ function refreshLocalizedDynamicUi() {
   const samAudioSpans = getToolsSamAudioSpanState();
   if (samAudioSpans.length) restoreToolsSamAudioSpanState(samAudioSpans);
   updateToolsSamAudioUi();
+  updateToolsHeygenUi();
   localizeVideoOptionFields(qs('videoOptionsDynamic'));
   if (typeof renderKling3Elements === 'function') renderKling3Elements();
 

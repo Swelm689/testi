@@ -3867,6 +3867,10 @@ model-viewer {
     margin-top: 0.8rem;
 }
 
+.compact-upload-preview[data-input-id="toolsUtilityVideoInput"] {
+    margin-top: 0.8rem;
+}
+
 @media (max-width: 900px) {
     .tools-suite-tab {
         flex: 1 1 auto;
@@ -6450,5 +6454,4 @@ body.wiz-fullscreen .generate-btn {
     color: var(--text-muted);
     padding-left: 0.75rem;
 }
-
 

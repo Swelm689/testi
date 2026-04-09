@@ -65,6 +65,12 @@ const IMAGE_MODELS = {
         allowed: ['audio_url', 'prompt', 'spans', 'reranking_candidates', 'acceleration', 'max_chunk_duration', 'chunk_overlap', 'use_sound_activity_ranking', 'trim_to_span', 'output_format'],
         requiresPrompt: false,
     },
+    'fal-ai/heygen/v2/translate/precision': {
+        endpoint: 'https://queue.fal.run/fal-ai/heygen/v2/translate/precision',
+        kind: 'video-to-video',
+        allowed: ['video_url', 'output_language', 'translate_audio_only', 'speaker_num', 'enable_dynamic_duration'],
+        requiresPrompt: false,
+    },
 };
 
 function pickAllowed(obj, allowed) {
