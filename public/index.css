@@ -379,6 +379,92 @@ body::after {
     margin-top: 0.75rem;
 }
 
+.video-seedance-embedded {
+    margin-bottom: 0.85rem;
+    padding: 0.85rem;
+    border: 1px solid rgba(212, 145, 90, 0.2);
+    border-radius: calc(var(--radius) + 2px);
+    background:
+        radial-gradient(circle at top right, rgba(212, 145, 90, 0.12), transparent 42%),
+        linear-gradient(180deg, rgba(23, 20, 28, 0.98), rgba(15, 13, 20, 0.96));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+}
+
+.video-family-note {
+    margin-top: 0.55rem;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.02);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.55;
+}
+
+.seedance2-model-note {
+    background:
+        linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.015)),
+        rgba(15, 14, 20, 0.95);
+}
+
+.seedance2-reference-group {
+    margin-top: 0.75rem;
+    padding: 0.85rem;
+    border: 1px solid rgba(212, 145, 90, 0.16);
+    border-radius: var(--radius-sm);
+    background: rgba(10, 10, 16, 0.42);
+}
+
+.seedance2-reference-tip {
+    color: var(--text-secondary);
+    font-size: 0.74rem;
+    line-height: 1.5;
+}
+
+.seedance2-reference-board {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-top: 0.8rem;
+    min-height: 3rem;
+    padding: 0.7rem;
+    border: 1px dashed rgba(212, 145, 90, 0.25);
+    border-radius: var(--radius-sm);
+    background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+}
+
+.seedance-token-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid rgba(212, 145, 90, 0.22);
+    background: linear-gradient(135deg, rgba(212, 145, 90, 0.16), rgba(130, 86, 53, 0.08));
+    color: var(--text-primary);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.seedance-token-pill strong {
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--accent-2);
+}
+
+.seedance-token-pill em {
+    font-style: normal;
+    font-size: 0.71rem;
+    color: var(--text-secondary);
+    letter-spacing: 0.01em;
+}
+
+.seedance-token-empty {
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+    line-height: 1.45;
+}
+
 /* ===== MAIN CONTENT ===== */
 .app-main {
     display: grid;
@@ -2452,6 +2538,34 @@ model-viewer {
     /* Fix iOS safe area */
     .controls-panel {
         padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    .video-seedance-embedded {
+        padding: 0.75rem;
+    }
+
+    .seedance2-reference-group {
+        padding: 0.75rem;
+    }
+
+    .seedance2-reference-board {
+        padding: 0.6rem;
+        gap: 0.35rem;
+    }
+
+    .seedance-token-pill {
+        width: 100%;
+        justify-content: space-between;
+        padding: 0.5rem 0.65rem;
+    }
+
+    .seedance-token-pill strong {
+        font-size: 0.74rem;
+    }
+
+    .seedance-token-pill em {
+        font-size: 0.68rem;
+        text-align: right;
     }
 }
 
@@ -6454,4 +6568,3 @@ body.wiz-fullscreen .generate-btn {
     color: var(--text-muted);
     padding-left: 0.75rem;
 }
-

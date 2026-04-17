@@ -4460,5 +4460,53 @@
   }
 })();
 
+(function applySeedance2VideoTranslations() {
+  if (!window.TRANSLATIONS) return;
+  const english = {
+    seedance2_note_text: "Seedance 2.0 text mode is tuned for cinematic direction, real-world physics, and native synced audio straight from the prompt.",
+    seedance2_note_image: "Animate a start image with strong camera motion, or guide the clip into an optional end frame for a designed transition.",
+    seedance2_note_reference: "Blend image, video, and audio references in one shot plan. Use @1 for image 1, @Video1 for video 1, and @Audio1 for audio 1.",
+    seedance2_reference_tip: "You can mix up to 12 total references here. Prompt with @1, @2, @Video1, @Video2, @Audio1, and similar tokens.",
+    seedance2_reference_empty: "Upload reference images, videos, or audio and their prompt tokens will appear here.",
+    seedance2_audio_requires_visual_ref: "Add at least one image or video reference when using audio references.",
+    seedance2_label_reference_images: "Reference Images (max 9)",
+    seedance2_label_reference_videos: "Reference Videos (max 3)",
+    seedance2_label_reference_audio: "Reference Audio (max 3)",
+    asset_seedance_ref_images: "Seedance -> Ref Images",
+    asset_seedance_ref_videos: "Seedance -> Ref Videos",
+    asset_seedance_ref_audio: "Seedance -> Ref Audio",
+  };
+  const russian = {
+    seedance2_note_text: "Режим текста в Seedance 2.0 заточен под кинематографичную постановку, реалистичную физику и нативный синхронный звук прямо из промпта.",
+    seedance2_note_image: "Анимируйте стартовое изображение с выразительным движением камеры или доведите клип до необязательного финального кадра для аккуратного перехода.",
+    seedance2_note_reference: "Смешивайте в одном запросе референсные изображения, видео и аудио. Используйте @1 для первого изображения, @Video1 для первого видео и @Audio1 для первого аудио.",
+    seedance2_reference_tip: "Здесь можно смешивать до 12 референсов суммарно. В промпте используйте @1, @2, @Video1, @Video2, @Audio1 и похожие токены.",
+    seedance2_reference_empty: "Загрузите референсные изображения, видео или аудио, и здесь появятся их токены для промпта.",
+    seedance2_audio_requires_visual_ref: "При использовании аудиореференсов добавьте хотя бы одно изображение или одно видео.",
+    seedance2_label_reference_images: "Референсные изображения (макс. 9)",
+    seedance2_label_reference_videos: "Референсные видео (макс. 3)",
+    seedance2_label_reference_audio: "Референсное аудио (макс. 3)",
+    asset_seedance_ref_images: "Seedance -> Реф. изображения",
+    asset_seedance_ref_videos: "Seedance -> Реф. видео",
+    asset_seedance_ref_audio: "Seedance -> Реф. аудио",
+  };
+  const localeValues = {
+    en: english,
+    es: english,
+    zh: english,
+    ar: english,
+    fr: english,
+    ru: { ...english, ...russian },
+    pt: english,
+    de: english,
+    ja: english,
+    ko: english,
+  };
+  for (const [locale, entries] of Object.entries(localeValues)) {
+    if (!window.TRANSLATIONS[locale]) continue;
+    Object.assign(window.TRANSLATIONS[locale], entries);
+  }
+})();
+
 
 

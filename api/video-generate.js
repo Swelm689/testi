@@ -298,6 +298,63 @@ const OPTION_DEFS = {
         "default": "720p",
         "label": "Resolution"
     },
+    "duration_seedance2": {
+        "type": "select",
+        "values": [
+            "auto",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14",
+            "15"
+        ],
+        "default": "auto",
+        "label": "Duration (sec)"
+    },
+    "aspect_ratio_seedance2_t2v_ref": {
+        "type": "select",
+        "values": [
+            "auto",
+            "21:9",
+            "16:9",
+            "4:3",
+            "1:1",
+            "3:4",
+            "9:16"
+        ],
+        "default": "auto",
+        "label": "Aspect Ratio"
+    },
+    "aspect_ratio_seedance2_i2v": {
+        "type": "select",
+        "values": [
+            "auto",
+            "21:9",
+            "16:9",
+            "4:3",
+            "1:1",
+            "3:4",
+            "9:16"
+        ],
+        "default": "auto",
+        "label": "Aspect Ratio"
+    },
+    "resolution_seedance2": {
+        "type": "select",
+        "values": [
+            "480p",
+            "720p"
+        ],
+        "default": "720p",
+        "label": "Resolution"
+    },
     "camera_fixed": {
         "type": "bool",
         "default": false,
@@ -1167,6 +1224,10 @@ const OPTION_DEFS = {
     "seed": {
         "type": "number",
         "label": "Seed"
+    },
+    "end_user_id": {
+        "type": "text",
+        "label": "End User ID"
     }
 };
 
@@ -1193,10 +1254,14 @@ const OPTION_KEY_ALIASES = {
     "context_ltx23": "context",
     "duration_seedance_lite": "duration",
     "duration_seedance_pro": "duration",
+    "duration_seedance2": "duration",
     "aspect_ratio_seedance_lite": "aspect_ratio",
     "aspect_ratio_seedance_lite_i2v": "aspect_ratio",
     "aspect_ratio_seedance_pro": "aspect_ratio",
+    "aspect_ratio_seedance2_t2v_ref": "aspect_ratio",
+    "aspect_ratio_seedance2_i2v": "aspect_ratio",
     "resolution_seedance": "resolution",
+    "resolution_seedance2": "resolution",
     "aspect_ratio_sora": "aspect_ratio",
     "aspect_ratio_sora_i2v": "aspect_ratio",
     "resolution_sora": "resolution",
@@ -1268,6 +1333,8 @@ const OPTION_KEY_ALIASES = {
 const VIDEO_SELECTOR_RANKS = {
     "ltx-2.3-pro-t2v": 91,
     "ltx-2.3-fast-t2v": 92,
+    "seedance-2.0-fast-t2v": 93,
+    "seedance-2.0-pro-t2v": 94,
     "sora-2-t2v": 101,
     "grok-imagine-t2v": 102,
     "seedance-v1.5-pro-t2v": 103,
@@ -1286,6 +1353,8 @@ const VIDEO_SELECTOR_RANKS = {
 
     "ltx-2.3-pro-i2v": 191,
     "ltx-2.3-fast-i2v": 192,
+    "seedance-2.0-fast-i2v": 193,
+    "seedance-2.0-pro-i2v": 194,
     "veo3.1-i2v": 201,
     "sora-2-i2v": 202,
     "grok-imagine-i2v": 203,
@@ -1320,7 +1389,9 @@ const VIDEO_SELECTOR_RANKS = {
     "animatediff-v2v": 307,
 
     "veo3.1-reference-to-video": 401,
-    "kling-o1-reference-to-video": 402,
+    "seedance-2.0-fast-ref2v": 402,
+    "seedance-2.0-pro-ref2v": 403,
+    "kling-o1-reference-to-video": 404,
 
     "ltx-2.3-a2v": 451,
 
@@ -1396,6 +1467,32 @@ const VIDEO_MODELS = {
             "duration_ltx23_fast": "number",
             "fps_ltx23": "number"
         }
+    },
+    "seedance-2.0-fast-t2v": {
+        "label": "Seedance 2.0 Fast (Text to Video)",
+        "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/fast/text-to-video",
+        "kind": "text-to-video",
+        "allowedOptions": [
+            "resolution_seedance2",
+            "duration_seedance2",
+            "aspect_ratio_seedance2_t2v_ref",
+            "generate_audio_on",
+            "seed",
+            "end_user_id"
+        ]
+    },
+    "seedance-2.0-pro-t2v": {
+        "label": "Seedance 2.0 Pro (Text to Video)",
+        "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/text-to-video",
+        "kind": "text-to-video",
+        "allowedOptions": [
+            "resolution_seedance2",
+            "duration_seedance2",
+            "aspect_ratio_seedance2_t2v_ref",
+            "generate_audio_on",
+            "seed",
+            "end_user_id"
+        ]
     },
     "seedance-v1-lite-t2v": {
         "label": "Seedance 1.0 Lite (Text to Video)",
@@ -1733,6 +1830,36 @@ const VIDEO_MODELS = {
             "fps_ltx23": "number"
         }
     },
+    "seedance-2.0-fast-i2v": {
+        "label": "Seedance 2.0 Fast (Image to Video)",
+        "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/fast/image-to-video",
+        "kind": "image-to-video",
+        "supportsEndImage": true,
+        "endImageParam": "end_image_url",
+        "allowedOptions": [
+            "resolution_seedance2",
+            "duration_seedance2",
+            "aspect_ratio_seedance2_i2v",
+            "generate_audio_on",
+            "seed",
+            "end_user_id"
+        ]
+    },
+    "seedance-2.0-pro-i2v": {
+        "label": "Seedance 2.0 Pro (Image to Video)",
+        "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/image-to-video",
+        "kind": "image-to-video",
+        "supportsEndImage": true,
+        "endImageParam": "end_image_url",
+        "allowedOptions": [
+            "resolution_seedance2",
+            "duration_seedance2",
+            "aspect_ratio_seedance2_i2v",
+            "generate_audio_on",
+            "seed",
+            "end_user_id"
+        ]
+    },
     "framepack-i2v": {
         "label": "Framepack (Image to Video)",
         "endpoint": "https://queue.fal.run/fal-ai/framepack",
@@ -1993,6 +2120,46 @@ const VIDEO_MODELS = {
         "allowedOptions": [
             "audio_url",
             "guidance_scale_ltx23_audio"
+        ]
+    },
+    "seedance-2.0-fast-ref2v": {
+        "label": "Seedance 2.0 Fast (Reference to Video)",
+        "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/fast/reference-to-video",
+        "kind": "reference-to-video",
+        "requiresImage": false,
+        "supportsVideoUrls": true,
+        "supportsAudioUrls": true,
+        "maxImageUrls": 9,
+        "maxVideoUrls": 3,
+        "maxAudioUrls": 3,
+        "maxTotalReferences": 12,
+        "allowedOptions": [
+            "resolution_seedance2",
+            "duration_seedance2",
+            "aspect_ratio_seedance2_t2v_ref",
+            "generate_audio_on",
+            "seed",
+            "end_user_id"
+        ]
+    },
+    "seedance-2.0-pro-ref2v": {
+        "label": "Seedance 2.0 Pro (Reference to Video)",
+        "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/reference-to-video",
+        "kind": "reference-to-video",
+        "requiresImage": false,
+        "supportsVideoUrls": true,
+        "supportsAudioUrls": true,
+        "maxImageUrls": 9,
+        "maxVideoUrls": 3,
+        "maxAudioUrls": 3,
+        "maxTotalReferences": 12,
+        "allowedOptions": [
+            "resolution_seedance2",
+            "duration_seedance2",
+            "aspect_ratio_seedance2_t2v_ref",
+            "generate_audio_on",
+            "seed",
+            "end_user_id"
         ]
     },
     "kling-o1-reference-to-video": {
@@ -2307,6 +2474,12 @@ module.exports = async function handler(req, res) {
                 requiresPrompt: (m && Object.prototype.hasOwnProperty.call(m, 'requiresPrompt')) ? m.requiresPrompt : true,
                 requiresImage: (m && Object.prototype.hasOwnProperty.call(m, 'requiresImage')) ? m.requiresImage : true,
                 usesImageUrls: (m && Object.prototype.hasOwnProperty.call(m, 'usesImageUrls')) ? m.usesImageUrls : true,
+                supportsVideoUrls: !!(m && m.supportsVideoUrls),
+                supportsAudioUrls: !!(m && m.supportsAudioUrls),
+                maxImageUrls: (m && typeof m.maxImageUrls === 'number') ? m.maxImageUrls : null,
+                maxVideoUrls: (m && typeof m.maxVideoUrls === 'number') ? m.maxVideoUrls : null,
+                maxAudioUrls: (m && typeof m.maxAudioUrls === 'number') ? m.maxAudioUrls : null,
+                maxTotalReferences: (m && typeof m.maxTotalReferences === 'number') ? m.maxTotalReferences : null,
                 supportsEndImage: !!(m && m.supportsEndImage),
                 startImageParam: m && m.startImageParam ? m.startImageParam : null,
                 endImageParam: m && m.endImageParam ? m.endImageParam : null,
@@ -2352,6 +2525,8 @@ module.exports = async function handler(req, res) {
         let end_image_url;
         let tail_image_url;
         let image_urls;
+        let video_urls;
+        let audio_urls;
         let elements;
         let videoFile;
         let endImageFile;
@@ -2374,6 +2549,8 @@ module.exports = async function handler(req, res) {
             end_image_url = body.end_image_url;
             tail_image_url = body.tail_image_url;
             image_urls = body.image_urls;
+            video_urls = body.video_urls;
+            audio_urls = body.audio_urls;
             elements = body.elements;
             options = body.options;
             // Handle audio_url from body
@@ -2413,6 +2590,22 @@ module.exports = async function handler(req, res) {
                 }
             }
 
+            if (fields.video_urls) {
+                try {
+                    video_urls = JSON.parse(fields.video_urls);
+                } catch {
+                    video_urls = null;
+                }
+            }
+
+            if (fields.audio_urls) {
+                try {
+                    audio_urls = JSON.parse(fields.audio_urls);
+                } catch {
+                    audio_urls = null;
+                }
+            }
+
             if (fields.elements) {
                 try {
                     elements = JSON.parse(fields.elements);
@@ -2436,6 +2629,9 @@ module.exports = async function handler(req, res) {
         }
 
         const selectedModel = VIDEO_MODELS[model_id] || VIDEO_MODELS['kling-o1-v2v-reference'];
+        const supportsReferenceVideos = !!selectedModel.supportsVideoUrls;
+        const supportsReferenceAudios = !!selectedModel.supportsAudioUrls;
+        const isSeedanceReferenceModel = selectedModel.kind === 'reference-to-video' && (supportsReferenceVideos || supportsReferenceAudios);
 
         if (!selectedModel) {
             return res.status(400).json({ error: 'Unknown model_id' });
@@ -2472,7 +2668,15 @@ module.exports = async function handler(req, res) {
             }
         }
 
-        if (selectedModel.kind === 'image-to-video' || selectedModel.kind === 'audio-to-video' || selectedModel.kind === 'motion-control' || selectedModel.kind === 'kling3-image-to-video' || selectedModel.kind === 'kling3-reference-to-video' || selectedModel.kind === 'kling3-motion-control') {
+        if (
+            selectedModel.kind === 'image-to-video'
+            || selectedModel.kind === 'audio-to-video'
+            || selectedModel.kind === 'motion-control'
+            || selectedModel.kind === 'kling3-image-to-video'
+            || selectedModel.kind === 'kling3-reference-to-video'
+            || selectedModel.kind === 'kling3-motion-control'
+            || (selectedModel.kind === 'reference-to-video' && selectedModel.requiresImage !== false)
+        ) {
             finalImageUrl = image_url || null;
 
             if (!finalImageUrl && Array.isArray(imageFiles) && imageFiles.length > 0) {
@@ -2519,7 +2723,7 @@ module.exports = async function handler(req, res) {
             }
         }
 
-        if (selectedModel.kind === 'reference-to-video') {
+        if (selectedModel.kind === 'reference-to-video' && !isSeedanceReferenceModel) {
             // Kling O1 reference-to-video expects start image + optional style references in image_urls,
             // and optional elements. We require at least one image.
             const hasAnyImageUrl =
@@ -2533,6 +2737,8 @@ module.exports = async function handler(req, res) {
         }
 
         const uploadedImageUrls = [];
+        const uploadedVideoUrls = [];
+        const uploadedAudioUrls = [];
         const shouldProcessImageUrls =
             (selectedModel.kind === 'video-to-video' || selectedModel.kind === 'reference-to-video' || selectedModel.kind === 'kling3-reference-to-video' || selectedModel.kind === 'kling3-video-to-video') &&
             selectedModel.usesImageUrls !== false;
@@ -2615,6 +2821,42 @@ module.exports = async function handler(req, res) {
                 if (t === 'number') {
                     numericKeys.add(k);
                 }
+            }
+        }
+
+        if (supportsReferenceVideos && Array.isArray(video_urls)) {
+            for (const u of video_urls) {
+                if (typeof u === 'string' && u) uploadedVideoUrls.push(u);
+            }
+        }
+
+        if (supportsReferenceAudios && Array.isArray(audio_urls)) {
+            for (const u of audio_urls) {
+                if (typeof u === 'string' && u) uploadedAudioUrls.push(u);
+            }
+        }
+
+        if (isSeedanceReferenceModel) {
+            const maxImageUrls = Number.isFinite(Number(selectedModel.maxImageUrls)) ? Number(selectedModel.maxImageUrls) : 9;
+            const maxVideoUrls = Number.isFinite(Number(selectedModel.maxVideoUrls)) ? Number(selectedModel.maxVideoUrls) : 3;
+            const maxAudioUrls = Number.isFinite(Number(selectedModel.maxAudioUrls)) ? Number(selectedModel.maxAudioUrls) : 3;
+            const maxTotalReferences = Number.isFinite(Number(selectedModel.maxTotalReferences)) ? Number(selectedModel.maxTotalReferences) : 12;
+            const totalReferences = uploadedImageUrls.length + uploadedVideoUrls.length + uploadedAudioUrls.length;
+
+            if (uploadedImageUrls.length > maxImageUrls) {
+                return res.status(400).json({ error: `Maximum ${maxImageUrls} reference images allowed for this model` });
+            }
+            if (uploadedVideoUrls.length > maxVideoUrls) {
+                return res.status(400).json({ error: `Maximum ${maxVideoUrls} reference videos allowed for this model` });
+            }
+            if (uploadedAudioUrls.length > maxAudioUrls) {
+                return res.status(400).json({ error: `Maximum ${maxAudioUrls} reference audio files allowed for this model` });
+            }
+            if (totalReferences > maxTotalReferences) {
+                return res.status(400).json({ error: `Maximum ${maxTotalReferences} total reference files allowed for this model` });
+            }
+            if (uploadedAudioUrls.length > 0 && uploadedImageUrls.length === 0 && uploadedVideoUrls.length === 0) {
+                return res.status(400).json({ error: 'Audio references require at least one image or video reference for this model' });
             }
         }
 
@@ -2720,6 +2962,14 @@ module.exports = async function handler(req, res) {
             if (Array.isArray(elementsForPayload) && elementsForPayload.length > 0) {
                 payload.elements = elementsForPayload;
             }
+        }
+
+        if (supportsReferenceVideos && uploadedVideoUrls.length > 0) {
+            payload.video_urls = uploadedVideoUrls;
+        }
+
+        if (supportsReferenceAudios && uploadedAudioUrls.length > 0) {
+            payload.audio_urls = uploadedAudioUrls;
         }
 
         // Handle Kling 3 elements for image-to-video and motion-control

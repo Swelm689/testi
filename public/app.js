@@ -287,6 +287,9 @@ let uploadedMaskFile = null;
 let uploadedVideoFile = null;
 let uploadedVideoImageFile = null;
 let uploadedReferenceImages = [];
+let uploadedSeedanceReferenceImages = [];
+let uploadedSeedanceReferenceVideos = [];
+let uploadedSeedanceReferenceAudios = [];
 let uploadedEndImageFile = null;
 let uploaded3dFrontFile = null;
 let uploaded3dBackFile = null;
@@ -315,12 +318,14 @@ let currentToolsTool = 'card-studio';
 let currentKling3Tab = 'v3-text-to-video';
 let currentKling3Family = 'v3';
 let currentLtx23Family = 'text-to-video';
+let currentSeedance2Family = 'text-to-video';
 let kling3MultiPrompts = [];
 let kling3Elements = []; // KlingV3ElementInput: { id, frontalImageFile, frontalImageUrl, referenceImageFiles, referenceImageUrls, videoFile, videoUrl }
 let kling3SelectedModelByTab = {};
 let kling3LastTabByFamily = { v3: 'v3-text-to-video', o3: 'o3-text-to-video' };
 let kling3ControlsInitialized = false;
 let ltx23SelectedModelByFamily = {};
+let seedance2SelectedModelByFamily = {};
 
 const TOOLS_TOOL_IDS = new Set(['card-studio', 'enhancer', 'background-removal', 'sam-audio', 'heygen-translate']);
 const TOOLS_TOOL_MODEL_IDS = {
@@ -755,8 +760,35 @@ const LTX23_MODEL_TO_FAMILY = new Map(
   Object.entries(LTX23_MODELS).flatMap(([family, models]) => (models || []).map((model) => [model.id, family])),
 );
 
+const SEEDANCE2_MODELS = {
+  'text-to-video': [
+    { id: 'seedance-2.0-fast-t2v', label: 'Fast' },
+    { id: 'seedance-2.0-pro-t2v', label: 'Pro' },
+  ],
+  'image-to-video': [
+    { id: 'seedance-2.0-fast-i2v', label: 'Fast' },
+    { id: 'seedance-2.0-pro-i2v', label: 'Pro' },
+  ],
+  'reference-to-video': [
+    { id: 'seedance-2.0-fast-ref2v', label: 'Fast' },
+    { id: 'seedance-2.0-pro-ref2v', label: 'Pro' },
+  ],
+};
+
+const SEEDANCE2_MODEL_TO_FAMILY = new Map(
+  Object.entries(SEEDANCE2_MODELS).flatMap(([family, models]) => (models || []).map((model) => [model.id, family])),
+);
+
 function isKling3VideoKind(kind) {
   return String(kind || '').trim().startsWith('kling3-');
+}
+
+function getSeedance2FamilyForModelId(modelId) {
+  return modelId ? (SEEDANCE2_MODEL_TO_FAMILY.get(String(modelId).trim()) || null) : null;
+}
+
+function isSeedance2VideoModelId(modelId) {
+  return !!getSeedance2FamilyForModelId(modelId);
 }
 
 function getLtx23FamilyForModelId(modelId) {
@@ -1302,6 +1334,7 @@ const ASSET_TARGETS = {
     { label: '3D Retexture → Style Image', i18nKey: 'asset_3d_retexture_style', mode: '3d', inputId: 'threeDRetextureStyleImageInput', select3dModel: 'fal-ai/meshy/v5/retexture' },
     { label: 'Video → Image', i18nKey: 'asset_video_image', mode: 'video', inputId: 'videoImageInput', videoTab: 'image-to-video' },
     { label: 'Video → End Frame', i18nKey: 'asset_video_end_frame', mode: 'video', inputId: 'videoEndImageInput', videoTab: 'image-to-video' },
+    { label: 'Seedance → Ref Images', i18nKey: 'asset_seedance_ref_images', mode: 'video', inputId: 'seedance2ReferenceImagesInput', videoTab: 'reference-to-video', selectVideoModel: 'seedance-2.0-fast-ref2v' },
     { label: 'Tools → Enhancer Image', mode: 'tools', inputId: 'toolsUtilityImageInput', toolsTool: 'enhancer' },
     { label: 'Tools → Cutout Image', mode: 'tools', inputId: 'toolsUtilityImageInput', toolsTool: 'background-removal' },
     { label: 'Kling3 → Start Image', i18nKey: 'asset_kling3_start', mode: 'video', inputId: 'kling3StartImageInput', videoTab: 'image-to-video', kling3Tab: 'image-to-video' },
@@ -1310,10 +1343,12 @@ const ASSET_TARGETS = {
   video: [
     { label: 'Video → Video Input', i18nKey: 'asset_video_input', mode: 'video', inputId: 'videoInput', videoTab: 'video-to-video' },
     { label: 'Kling3 → Video Input', i18nKey: 'asset_kling3_video', mode: 'video', inputId: 'kling3VideoInput', videoTab: 'video-to-video', kling3Tab: 'video-to-video' },
+    { label: 'Seedance → Ref Videos', i18nKey: 'asset_seedance_ref_videos', mode: 'video', inputId: 'seedance2ReferenceVideosInput', videoTab: 'reference-to-video', selectVideoModel: 'seedance-2.0-fast-ref2v' },
     { label: 'Tools → Heygen Translate', mode: 'tools', inputId: 'toolsUtilityVideoInput', toolsTool: 'heygen-translate' },
   ],
   audio: [
     { label: 'Video → Audio Input', mode: 'video', inputId: 'audioInput', videoTab: 'audio-to-video' },
+    { label: 'Seedance → Ref Audio', i18nKey: 'asset_seedance_ref_audio', mode: 'video', inputId: 'seedance2ReferenceAudiosInput', videoTab: 'reference-to-video', selectVideoModel: 'seedance-2.0-fast-ref2v' },
     { label: 'Tools → SAM Audio', mode: 'tools', inputId: 'toolsUtilityAudioInput', toolsTool: 'sam-audio' },
   ],
   '3d': [
@@ -1409,6 +1444,15 @@ async function applyAsset(item, target) {
     update3dUiVisibility();
   }
 
+  if (target.selectVideoModel) {
+    await ensureVideoModelsReady();
+    const videoSel = qs('videoModel');
+    if (videoSel && videoSel.value !== target.selectVideoModel) {
+      videoSel.value = target.selectVideoModel;
+      videoSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
   const targetVideoTab = resolveAssetTargetVideoTab(target);
   if (targetVideoTab) {
     ensureVideoControls();
@@ -1470,6 +1514,9 @@ const MANAGED_UPLOADS = {
   videoInput: { labelId: 'videoFileLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: false, remoteUrlInputId: 'videoUrlInput', getFiles: () => uploadedVideoFile ? [uploadedVideoFile] : [], setFiles: (next) => { uploadedVideoFile = next || null; } },
   videoImageInput: { labelId: 'videoImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedVideoImageFile ? [uploadedVideoImageFile] : [], setFiles: (next) => { uploadedVideoImageFile = next || null; } },
   referenceImagesInput: { labelId: 'refImagesLabel', emptyKey: 'select_images', previewKind: 'image', kind: 'image', multiple: true, getFiles: () => uploadedReferenceImages, setFiles: (next) => { uploadedReferenceImages = next; } },
+  seedance2ReferenceImagesInput: { labelId: 'seedance2RefImagesLabel', emptyKey: 'select_images', previewKind: 'image', kind: 'image', multiple: true, getFiles: () => uploadedSeedanceReferenceImages, setFiles: (next) => { uploadedSeedanceReferenceImages = next; } },
+  seedance2ReferenceVideosInput: { labelId: 'seedance2RefVideosLabel', emptyKey: 'upload_video', previewKind: 'video', kind: 'video', multiple: true, getFiles: () => uploadedSeedanceReferenceVideos, setFiles: (next) => { uploadedSeedanceReferenceVideos = next; } },
+  seedance2ReferenceAudiosInput: { labelId: 'seedance2RefAudiosLabel', emptyKey: 'select_audio', kind: 'audio', multiple: true, showFileName: true, getFiles: () => uploadedSeedanceReferenceAudios, setFiles: (next) => { uploadedSeedanceReferenceAudios = next; } },
   videoEndImageInput: { labelId: 'endImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedEndImageFile ? [uploadedEndImageFile] : [], setFiles: (next) => { uploadedEndImageFile = next || null; } },
   audioInput: { labelId: 'audioFileLabel', emptyKey: 'select_audio', kind: 'audio', multiple: false, showFileName: true, getFiles: () => uploadedAudioFile ? [uploadedAudioFile] : [], setFiles: (next) => { uploadedAudioFile = next || null; } },
   toolsUtilityImageInput: { labelId: 'toolsUtilityImageLabel', emptyKey: 'select_image', previewKind: 'image', kind: 'image', multiple: false, getFiles: () => uploadedToolsUtilityImage ? [uploadedToolsUtilityImage] : [], setFiles: (next) => { uploadedToolsUtilityImage = next || null; } },
@@ -1618,6 +1665,7 @@ function detectPreviewKind(file, config) {
   const type = String((file && file.type) || '').toLowerCase();
   if (type.startsWith('image/')) return 'image';
   if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return 'audio';
   return null;
 }
 
@@ -1637,7 +1685,7 @@ function renderCompactPreviewForInput(inputEl, config) {
   const previewable = files.some((file) => !!detectPreviewKind(file, config))
     || remoteItems.some((item) => {
       const assetType = item && item.assetType ? item.assetType : (config.previewKind || config.kind || '');
-      return assetType === 'image' || assetType === 'video';
+      return assetType === 'image' || assetType === 'video' || assetType === 'audio';
     });
   if (!previewable) {
     host.style.display = 'none';
@@ -1674,7 +1722,7 @@ function renderCompactPreviewForInput(inputEl, config) {
     tile.title = isRemote ? src : file.name;
 
     const previewSrc = isRemote ? src : URL.createObjectURL(file);
-    if (!isRemote) host._blobUrls.push(previewSrc);
+    if (!isRemote && kind !== 'audio') host._blobUrls.push(previewSrc);
 
     if (kind === 'video') {
       const video = document.createElement('video');
@@ -1688,6 +1736,11 @@ function renderCompactPreviewForInput(inputEl, config) {
         video.play().catch(() => {});
       }, { once: true });
       tile.appendChild(video);
+    } else if (kind === 'audio') {
+      const img = document.createElement('img');
+      img.src = createAudioPlaceholderDataUrl('AUDIO');
+      img.alt = getAssetItemName(file, config.kind || 'audio');
+      tile.appendChild(img);
     } else {
       const img = document.createElement('img');
       img.src = previewSrc;
@@ -1745,6 +1798,7 @@ function refreshManagedUploadUi(inputEl) {
   if (labelEl) labelEl.textContent = getManagedUploadLabel(config, files);
   renderCompactPreviewForInput(inputEl, config);
   if (inputEl.id === 'toolsUtilityImageInput' || inputEl.id === 'toolsUtilityAudioInput' || inputEl.id === 'toolsUtilityVideoInput') refreshToolsUtilitySourceUi();
+  if (inputEl.id === 'seedance2ReferenceImagesInput' || inputEl.id === 'seedance2ReferenceVideosInput' || inputEl.id === 'seedance2ReferenceAudiosInput') updateSeedance2ReferenceUi();
 }
 
 function bindManagedUploadInput(inputEl, config) {
@@ -2659,9 +2713,24 @@ function openFullscreen() {
 }
 window.openFullscreen = openFullscreen;
 
-// Substitute @1..@14 with "Image 1".."Image 14" in prompt text
+function substituteSeedanceReferenceRefs(text) {
+  return String(text || '').replace(/@(?!Image|Video|Audio)(1[0-2]|[1-9])\b/g, (m, n) => `@Image${parseInt(n, 10)}`);
+}
+
+// Substitute @1..@14 with "Image 1".."Image 14" in prompt text for models that expect human-readable refs.
 function substituteImageRefs(text) {
-  return text.replace(/@(1[0-4]|[1-9])/g, (m, n) => `Image ${parseInt(n, 10)}`);
+  return String(text || '').replace(/@(1[0-4]|[1-9])\b/g, (m, n) => `Image ${parseInt(n, 10)}`);
+}
+
+function normalizePromptRefsForCurrentContext(text) {
+  const raw = String(text || '');
+  if (currentMode === 'video') {
+    const modelMeta = getSelectedVideoModel();
+    if (modelMeta && isSeedance2VideoModelId(modelMeta.id) && getSeedance2FamilyForModelId(modelMeta.id) === 'reference-to-video') {
+      return substituteSeedanceReferenceRefs(raw);
+    }
+  }
+  return substituteImageRefs(raw);
 }
 
 // Update image upload preview with thumbnails
@@ -3136,6 +3205,14 @@ async function loadVideoModels() {
         id: m.id,
         label: m.label || m.id,
         kind: m.kind || '',
+        selectorRank: Number.isFinite(Number(m.selectorRank)) ? Number(m.selectorRank) : DEFAULT_VIDEO_SELECTOR_RANK,
+        requiresImage: m && Object.prototype.hasOwnProperty.call(m, 'requiresImage') ? m.requiresImage : true,
+        supportsVideoUrls: !!(m && m.supportsVideoUrls),
+        supportsAudioUrls: !!(m && m.supportsAudioUrls),
+        maxImageUrls: Number.isFinite(Number(m && m.maxImageUrls)) ? Number(m.maxImageUrls) : null,
+        maxVideoUrls: Number.isFinite(Number(m && m.maxVideoUrls)) ? Number(m.maxVideoUrls) : null,
+        maxAudioUrls: Number.isFinite(Number(m && m.maxAudioUrls)) ? Number(m.maxAudioUrls) : null,
+        maxTotalReferences: Number.isFinite(Number(m && m.maxTotalReferences)) ? Number(m.maxTotalReferences) : null,
         addedAt: m.addedAt || null,
         newsDescription: m.newsDescription || '',
         newsDescriptionKey: m.newsDescriptionKey || null,
@@ -3158,8 +3235,9 @@ function getSelectedVideoModel() {
 
 function getVideoFamilyPriority(model) {
   if (model && model.kind && isKling3VideoKind(model.kind)) return 0;
-  if (model && model.id && isLtx23VideoModelId(model.id)) return 1;
-  return 2;
+  if (model && model.id && isSeedance2VideoModelId(model.id)) return 1;
+  if (model && model.id && isLtx23VideoModelId(model.id)) return 2;
+  return 3;
 }
 
 function getVideoModelsForTab(tab) {
@@ -3172,7 +3250,10 @@ function getVideoModelsForTab(tab) {
   }).sort((a, b) => {
     const familyDiff = getVideoFamilyPriority(a) - getVideoFamilyPriority(b);
     if (familyDiff !== 0) return familyDiff;
-    return 0;
+    const rankDiff = (Number.isFinite(Number(a && a.selectorRank)) ? Number(a.selectorRank) : DEFAULT_VIDEO_SELECTOR_RANK)
+      - (Number.isFinite(Number(b && b.selectorRank)) ? Number(b.selectorRank) : DEFAULT_VIDEO_SELECTOR_RANK);
+    if (rankDiff !== 0) return rankDiff;
+    return String(a && a.label || '').localeCompare(String(b && b.label || ''));
   });
 }
 
@@ -3315,6 +3396,213 @@ function switchLtx23Family(family, options = {}) {
   selectLtx23Model(preferredId, options);
 }
 window.switchLtx23Family = switchLtx23Family;
+
+function getSelectedSeedance2ModelId(fallback = '') {
+  if (fallback && isSeedance2VideoModelId(fallback)) return fallback;
+  const videoModelId = qs('videoModel') ? String(qs('videoModel').value || '').trim() : '';
+  if (isSeedance2VideoModelId(videoModelId)) return videoModelId;
+  const seedanceModelId = qs('seedance2Model') ? String(qs('seedance2Model').value || '').trim() : '';
+  if (isSeedance2VideoModelId(seedanceModelId)) return seedanceModelId;
+  return '';
+}
+
+function getSeedance2ModelsForFamily(family) {
+  return SEEDANCE2_MODELS[family] || [];
+}
+
+function refreshSeedance2ModelDropdown(preferredId = '') {
+  const sel = qs('seedance2Model');
+  if (!sel) return;
+  const prev = sel.value;
+  const items = getSeedance2ModelsForFamily(currentSeedance2Family);
+  setSelectOptions(sel, items);
+  const remembered = seedance2SelectedModelByFamily[currentSeedance2Family];
+  if (preferredId && Array.isArray(items) && items.some((m) => m.id === preferredId)) {
+    sel.value = preferredId;
+  } else if (remembered && Array.isArray(items) && items.some((m) => m.id === remembered)) {
+    sel.value = remembered;
+  } else if (prev && Array.isArray(items) && items.some((m) => m.id === prev)) {
+    sel.value = prev;
+  } else if (items[0]) {
+    sel.value = items[0].id;
+  }
+}
+
+function renderSeedance2VariantTabs(preferredId = '') {
+  const host = qs('seedance2VariantTabs');
+  if (!host) return;
+  const models = getSeedance2ModelsForFamily(currentSeedance2Family);
+  const activeId = getSelectedSeedance2ModelId(preferredId) || seedance2SelectedModelByFamily[currentSeedance2Family] || (models[0] && models[0].id) || '';
+  host.innerHTML = models.map((model) => `
+    <button class="sub-tab ${model.id === activeId ? 'active' : ''}" type="button" onclick="selectSeedance2Model('${model.id}')">
+      ${escapeHtml(model.label)}
+    </button>
+  `).join('');
+}
+
+function syncSeedance2FamilyButtons() {
+  const familyIds = {
+    'text-to-video': 'seedance2family-text',
+    'image-to-video': 'seedance2family-image',
+    'reference-to-video': 'seedance2family-reference',
+  };
+  Object.entries(familyIds).forEach(([family, id]) => {
+    const el = qs(id);
+    if (el) el.classList.toggle('active', family === currentSeedance2Family);
+  });
+}
+
+function getSeedance2ReferenceSources() {
+  return {
+    images: [
+      ...getManagedUploadRemoteItems(MANAGED_UPLOADS.seedance2ReferenceImagesInput),
+      ...(Array.isArray(uploadedSeedanceReferenceImages) ? uploadedSeedanceReferenceImages : []),
+    ],
+    videos: [
+      ...getManagedUploadRemoteItems(MANAGED_UPLOADS.seedance2ReferenceVideosInput),
+      ...(Array.isArray(uploadedSeedanceReferenceVideos) ? uploadedSeedanceReferenceVideos : []),
+    ],
+    audios: [
+      ...getManagedUploadRemoteItems(MANAGED_UPLOADS.seedance2ReferenceAudiosInput),
+      ...(Array.isArray(uploadedSeedanceReferenceAudios) ? uploadedSeedanceReferenceAudios : []),
+    ],
+  };
+}
+
+function buildSeedance2TokenPill(token, title) {
+  return `<span class="seedance-token-pill" title="${escapeHtml(title)}"><strong>${escapeHtml(token)}</strong><em>${escapeHtml(title)}</em></span>`;
+}
+
+function updateSeedance2ReferenceUi() {
+  const modelMeta = getSelectedVideoModel();
+  const isSeedance = !!(modelMeta && isSeedance2VideoModelId(modelMeta.id));
+  const noteEl = qs('seedance2ModelNote');
+  if (noteEl) {
+    const key = currentSeedance2Family === 'image-to-video'
+      ? 'seedance2_note_image'
+      : currentSeedance2Family === 'reference-to-video'
+        ? 'seedance2_note_reference'
+        : 'seedance2_note_text';
+    const fallback = currentSeedance2Family === 'image-to-video'
+      ? 'Animate a start image or transition into an end frame with cinematic motion and native audio.'
+      : currentSeedance2Family === 'reference-to-video'
+        ? 'Blend image, video, and audio references in one prompt. Use @1 for image refs, @Video1 for video refs, and @Audio1 for audio refs.'
+        : 'High-end cinematic text-to-video with native audio, physical motion, and strong camera direction.';
+    noteEl.textContent = toolsUiText(key, fallback);
+  }
+
+  const refGroup = qs('seedance2ReferenceGroup');
+  if (refGroup) refGroup.style.display = isSeedance && currentSeedance2Family === 'reference-to-video' ? 'block' : 'none';
+
+  const tipEl = qs('seedance2ReferenceTip');
+  if (tipEl) {
+    tipEl.textContent = getI18nText(
+      'seedance2_reference_tip',
+      'Use @1 for image 1, @2 for image 2, @Video1 for video 1, and @Audio1 for audio 1.'
+    );
+  }
+
+  const board = qs('seedance2ReferenceTokenBoard');
+  if (!board) return;
+  const refs = getSeedance2ReferenceSources();
+  const pills = [];
+
+  refs.images.forEach((_, index) => {
+    const idx = index + 1;
+    pills.push(buildSeedance2TokenPill(`@${idx}`, `Image ${idx}`));
+    pills.push(buildSeedance2TokenPill(`@Image${idx}`, `Image ${idx}`));
+  });
+  refs.videos.forEach((_, index) => {
+    const idx = index + 1;
+    pills.push(buildSeedance2TokenPill(`@Video${idx}`, `Video ${idx}`));
+  });
+  refs.audios.forEach((_, index) => {
+    const idx = index + 1;
+    pills.push(buildSeedance2TokenPill(`@Audio${idx}`, `Audio ${idx}`));
+  });
+
+  board.innerHTML = pills.length
+    ? pills.join('')
+    : `<span class="seedance-token-empty">${escapeHtml(getI18nText('seedance2_reference_empty', 'Upload references to get prompt tokens here.'))}</span>`;
+}
+
+function ensureSeedance2EmbeddedSection() {
+  const videoHost = qs('videoUploadGroup');
+  const seedanceSection = qs('seedance2UploadGroup');
+  if (!videoHost || !seedanceSection) return;
+
+  const videoControls = qs('videoControls');
+  const desiredInsertBefore = videoControls || null;
+  if (seedanceSection.parentElement !== videoHost) {
+    if (desiredInsertBefore) videoHost.insertBefore(seedanceSection, desiredInsertBefore);
+    else videoHost.appendChild(seedanceSection);
+  } else if (videoControls && seedanceSection.nextElementSibling !== videoControls) {
+    videoHost.insertBefore(seedanceSection, desiredInsertBefore);
+  }
+
+  seedanceSection.classList.add('video-seedance-embedded');
+  if (seedanceSection.dataset.ready !== 'true') {
+    const seedanceModelSel = qs('seedance2Model');
+    if (seedanceModelSel) {
+      seedanceModelSel.addEventListener('change', () => {
+        if (seedanceModelSel.value) selectSeedance2Model(seedanceModelSel.value);
+      });
+    }
+    seedanceSection.dataset.ready = 'true';
+  }
+
+  syncSeedance2FamilyButtons();
+  refreshSeedance2ModelDropdown();
+  renderSeedance2VariantTabs();
+  updateSeedance2ReferenceUi();
+}
+
+function syncSeedance2StateFromVideoModelId(modelId, options = {}) {
+  const family = getSeedance2FamilyForModelId(modelId);
+  if (!family) return false;
+  currentSeedance2Family = family;
+  seedance2SelectedModelByFamily[family] = modelId;
+  ensureSeedance2EmbeddedSection();
+  syncSeedance2FamilyButtons();
+  refreshSeedance2ModelDropdown(modelId);
+  renderSeedance2VariantTabs(modelId);
+  updateSeedance2ReferenceUi();
+  if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
+  return true;
+}
+
+function selectSeedance2Model(modelId, options = {}) {
+  const family = getSeedance2FamilyForModelId(modelId);
+  if (!family) return;
+  currentSeedance2Family = family;
+  seedance2SelectedModelByFamily[family] = modelId;
+  if (currentVideoTab !== family) {
+    currentVideoTab = family;
+    setActiveVideoTabButtonState(currentVideoTab);
+  }
+  refreshVideoModelDropdown(modelId);
+  refreshSeedance2ModelDropdown(modelId);
+  const videoSel = qs('videoModel');
+  if (videoSel) videoSel.value = modelId;
+  ensureSeedance2EmbeddedSection();
+  updateVideoUiVisibility();
+  renderVideoOptionsUI();
+  updateSeedance2ReferenceUi();
+  if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
+}
+window.selectSeedance2Model = selectSeedance2Model;
+
+function switchSeedance2Family(family, options = {}) {
+  if (!SEEDANCE2_MODELS[family]) return;
+  currentSeedance2Family = family;
+  const remembered = seedance2SelectedModelByFamily[family];
+  const models = getSeedance2ModelsForFamily(family);
+  const preferredId = (options.preferredModelId && isSeedance2VideoModelId(options.preferredModelId))
+    ? options.preferredModelId
+    : (remembered || (models[0] && models[0].id) || '');
+  selectSeedance2Model(preferredId, options);
+}
+window.switchSeedance2Family = switchSeedance2Family;
 
 function ensureKling3EmbeddedSection() {
   const videoHost = qs('videoUploadGroup');
@@ -3671,6 +3959,7 @@ function ensureVideoControls() {
   const host = qs('videoUploadGroup');
   if (!host) return;
   if (qs('videoModel')) {
+    ensureSeedance2EmbeddedSection();
     ensureLtx23EmbeddedSection();
     ensureKling3EmbeddedSection();
     return;
@@ -3755,6 +4044,7 @@ function ensureVideoControls() {
   `;
 
   host.appendChild(wrap);
+  ensureSeedance2EmbeddedSection();
   ensureLtx23EmbeddedSection();
   ensureKling3EmbeddedSection();
   if (window.I18N && typeof window.I18N.applyLocale === 'function') {
@@ -3791,10 +4081,11 @@ function ensureVideoControls() {
     modelSel.addEventListener('change', () => {
       updateVideoUiVisibility();
       renderVideoOptionsUI();
+      updateSeedance2ReferenceUi();
     });
   }
 
-  ['videoInput', 'videoImageInput', 'referenceImagesInput', 'videoEndImageInput', 'audioInput'].forEach((inputId) => {
+  ['videoInput', 'videoImageInput', 'referenceImagesInput', 'videoEndImageInput', 'audioInput', 'seedance2ReferenceImagesInput', 'seedance2ReferenceVideosInput', 'seedance2ReferenceAudiosInput'].forEach((inputId) => {
     bindManagedUploadById(inputId);
     const inputEl = qs(inputId);
     if (inputEl) setupDropZone(inputEl.closest('.upload-zone'), inputEl);
@@ -3806,17 +4097,20 @@ function ensureVideoControls() {
 }
 function updateVideoUiVisibility() {
   ensureVideoControls();
+  ensureSeedance2EmbeddedSection();
   ensureLtx23EmbeddedSection();
   ensureKling3EmbeddedSection();
   const modelMeta = getSelectedVideoModel();
   const kind = (modelMeta && modelMeta.kind) ? modelMeta.kind : currentVideoTab;
   const isKlingModel = !!(modelMeta && isKling3VideoKind(modelMeta.kind));
+  const isSeedance2Model = !!(modelMeta && isSeedance2VideoModelId(modelMeta.id));
+  const isSeedance2ReferenceModel = !!(modelMeta && getSeedance2FamilyForModelId(modelMeta.id) === 'reference-to-video');
   const isLtx23Model = !!(modelMeta && isLtx23VideoModelId(modelMeta.id));
   const supportsReferenceImages = !modelMeta || modelMeta.usesImageUrls !== false;
 
   const showVideo = !isKlingModel && (kind === 'video-to-video' || kind === 'motion-control' || kind === 'video-id-to-video');
-  const showImage = !isKlingModel && (kind === 'image-to-video' || kind === 'audio-to-video' || kind === 'motion-control' || kind === 'reference-to-video');
-  const showRefs = !isKlingModel && supportsReferenceImages && (kind === 'reference-to-video' || kind === 'video-to-video');
+  const showImage = !isKlingModel && !isSeedance2ReferenceModel && (kind === 'image-to-video' || kind === 'audio-to-video' || kind === 'motion-control' || kind === 'reference-to-video');
+  const showRefs = !isKlingModel && !isSeedance2ReferenceModel && supportsReferenceImages && (kind === 'reference-to-video' || kind === 'video-to-video');
   const showAudioModelRow = true;
 
   if (qs('videoUrlGroup')) qs('videoUrlGroup').style.display = showVideo ? 'block' : 'none';
@@ -3841,11 +4135,19 @@ function updateVideoUiVisibility() {
   const videoOptionsHost = qs('videoOptionsDynamic');
   if (videoOptionsHost) videoOptionsHost.style.display = isKlingModel ? 'none' : '';
 
+  const seedanceSection = qs('seedance2UploadGroup');
+  if (seedanceSection) seedanceSection.style.display = isSeedance2Model ? 'block' : 'none';
+
   const ltxSection = qs('ltx23UploadGroup');
   if (ltxSection) ltxSection.style.display = isLtx23Model ? 'block' : 'none';
 
   const klingSection = qs('kling3UploadGroup');
   if (klingSection) klingSection.style.display = isKlingModel ? 'block' : 'none';
+
+  if (isSeedance2Model) {
+    syncSeedance2StateFromVideoModelId(modelMeta.id, { skipSave: true });
+    updateSeedance2ReferenceUi();
+  }
 
   if (isLtx23Model) {
     syncLtx23StateFromVideoModelId(modelMeta.id, { skipSave: true });
@@ -10018,6 +10320,7 @@ async function submitVideoRequest(task) {
   const prompt = task.prompt;
 
   const body = { model_id: modelId, prompt };
+  const isSeedance2ReferenceModel = !!(modelMeta && isSeedance2VideoModelId(modelMeta.id) && getSeedance2FamilyForModelId(modelMeta.id) === 'reference-to-video');
 
   const { options, top } = collectVideoOptionsFromUI();
   // Pass duration variants to backend options so it can map them correctly
@@ -10050,38 +10353,49 @@ async function submitVideoRequest(task) {
   ];
 
   const audioSource = getManagedUploadPrimarySource(MANAGED_UPLOADS.audioInput, uploadedAudioFile);
+  const seedanceRefs = isSeedance2ReferenceModel ? getSeedance2ReferenceSources() : null;
 
   if (videoSource) {
     const vu = await resolveUploadItemUrl(videoSource, 'video', task);
     if (vu) body.video_url = vu;
   }
 
-  if (videoImageSource) {
+  if (!isSeedance2ReferenceModel && videoImageSource) {
     const iu = await resolveUploadItemUrl(videoImageSource, 'video-image', task);
     if (iu) body.image_url = iu;
   }
   if (
     modelMeta
     && modelMeta.requiresImage !== false
+    && !isSeedance2ReferenceModel
     && ['image-to-video', 'audio-to-video', 'reference-to-video', 'motion-control'].includes(modelMeta.kind)
     && !body.image_url
   ) {
     throw new Error('Failed to attach the start image for this video model. Please reselect the image and try again.');
   }
 
-  if (endImageSource) {
+  if (!isSeedance2ReferenceModel && endImageSource) {
     const eu = await resolveUploadItemUrl(endImageSource, 'video-end-image', task);
     if (eu) body.end_image_url = eu;
   }
 
-  if (referenceSources.length > 0) {
+  if (!isSeedance2ReferenceModel && referenceSources.length > 0) {
     const imageUrls = await resolveUploadItemUrls(referenceSources, 'video-reference', task);
     if (imageUrls.length > 0) body.image_urls = imageUrls;
   }
 
-  if (audioSource) {
+  if (!isSeedance2ReferenceModel && audioSource) {
     const au = await resolveUploadItemUrl(audioSource, 'audio', task);
     if (au) body.audio_url = au;
+  }
+
+  if (isSeedance2ReferenceModel && seedanceRefs) {
+    const imageUrls = await resolveUploadItemUrls(seedanceRefs.images, 'seedance-reference-image', task, 9);
+    const videoUrls = await resolveUploadItemUrls(seedanceRefs.videos, 'seedance-reference-video', task, 3);
+    const audioUrls = await resolveUploadItemUrls(seedanceRefs.audios, 'seedance-reference-audio', task, 3);
+    if (imageUrls.length > 0) body.image_urls = imageUrls;
+    if (videoUrls.length > 0) body.video_urls = videoUrls;
+    if (audioUrls.length > 0) body.audio_urls = audioUrls;
   }
 
   const res = await fetch('/api/video-generate', {
@@ -10384,7 +10698,7 @@ async function handleGenerate() {
       prompt = `Background Removal · ${format}`;
     }
   } else {
-    const _rawPrompt = qs('promptInput') ? substituteImageRefs(qs('promptInput').value.trim()) : '';
+    const _rawPrompt = qs('promptInput') ? normalizePromptRefsForCurrentContext(qs('promptInput').value.trim()) : '';
     prompt = _rawPrompt ? `/${_rawPrompt}` : '';
   }
   const currentVideoModelMeta = currentMode === 'video' ? getSelectedVideoModel() : null;
@@ -10411,12 +10725,44 @@ async function handleGenerate() {
   }
   if (currentMode === 'video' && currentVideoModelMeta && !currentVideoUsesKling3) {
     const kind = currentVideoModelMeta.kind;
+    const isSeedance2ReferenceModel = isSeedance2VideoModelId(currentVideoModelMeta.id) && getSeedance2FamilyForModelId(currentVideoModelMeta.id) === 'reference-to-video';
     const needsStartImage =
       currentVideoModelMeta.requiresImage !== false
+      && !isSeedance2ReferenceModel
       && (kind === 'image-to-video' || kind === 'audio-to-video' || kind === 'reference-to-video' || kind === 'motion-control');
     if (needsStartImage && !getManagedUploadPrimarySource(MANAGED_UPLOADS.videoImageInput, uploadedVideoImageFile)) {
       showToast(window.I18N ? I18N.t('select_image') : 'Select image', 'error');
       return;
+    }
+    if (isSeedance2ReferenceModel) {
+      const refs = getSeedance2ReferenceSources();
+      const imageCount = refs.images.length;
+      const videoCount = refs.videos.length;
+      const audioCount = refs.audios.length;
+      const maxImageCount = Number.isFinite(Number(currentVideoModelMeta.maxImageUrls)) ? Number(currentVideoModelMeta.maxImageUrls) : 9;
+      const maxVideoCount = Number.isFinite(Number(currentVideoModelMeta.maxVideoUrls)) ? Number(currentVideoModelMeta.maxVideoUrls) : 3;
+      const maxAudioCount = Number.isFinite(Number(currentVideoModelMeta.maxAudioUrls)) ? Number(currentVideoModelMeta.maxAudioUrls) : 3;
+      const maxTotalCount = Number.isFinite(Number(currentVideoModelMeta.maxTotalReferences)) ? Number(currentVideoModelMeta.maxTotalReferences) : 12;
+      if (imageCount > maxImageCount) {
+        showToast(`Seedance supports up to ${maxImageCount} reference images.`, 'error');
+        return;
+      }
+      if (videoCount > maxVideoCount) {
+        showToast(`Seedance supports up to ${maxVideoCount} reference videos.`, 'error');
+        return;
+      }
+      if (audioCount > maxAudioCount) {
+        showToast(`Seedance supports up to ${maxAudioCount} reference audio files.`, 'error');
+        return;
+      }
+      if (imageCount + videoCount + audioCount > maxTotalCount) {
+        showToast(`Seedance supports up to ${maxTotalCount} total reference files.`, 'error');
+        return;
+      }
+      if (audioCount > 0 && imageCount === 0 && videoCount === 0) {
+        showToast(getI18nText('seedance2_audio_requires_visual_ref', 'Add at least one image or video reference when using audio references.'), 'error');
+        return;
+      }
     }
   }
   // Kling 3 mode - check for prompt or multi-prompt
@@ -11129,6 +11475,7 @@ function refreshLocalizedDynamicUi() {
   closeToolsHelpPopover();
   initTopazHelpButtons();
   refreshAllManagedUploads();
+  updateSeedance2ReferenceUi();
   refreshToolsUtilitySourceUi();
   updateToolsEnhancerUi();
   const samAudioSpans = getToolsSamAudioSpanState();
@@ -11523,6 +11870,7 @@ if (savedMode) {
 hookNewsLocaleUpdates();
 if (window.I18N) window.I18N.init();
 refreshModelNews(true);
+
 
 
 

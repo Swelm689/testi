@@ -556,6 +556,63 @@
                         </nav>
                     </div>
 
+                    <div id="seedance2UploadGroup" class="section-block" style="display: none;">
+                        <nav class="sub-tabs" id="seedance2FamilyTabs">
+                            <button class="sub-tab active" type="button" onclick="switchSeedance2Family('text-to-video')" id="seedance2family-text">
+                                <i data-lucide="type"></i> <span data-i18n="vtab_text">Text</span>
+                            </button>
+                            <button class="sub-tab" type="button" onclick="switchSeedance2Family('image-to-video')" id="seedance2family-image">
+                                <i data-lucide="image"></i> <span data-i18n="vtab_image">Image</span>
+                            </button>
+                            <button class="sub-tab" type="button" onclick="switchSeedance2Family('reference-to-video')" id="seedance2family-reference">
+                                <i data-lucide="layers"></i> <span data-i18n="vtab_ref">Ref</span>
+                            </button>
+                        </nav>
+
+                        <div class="settings-row" style="margin-top:0.75rem;">
+                            <div class="field" style="flex:2;">
+                                <label data-i18n="label_model">Model</label>
+                                <select id="seedance2Model"></select>
+                            </div>
+                        </div>
+
+                        <nav class="sub-tabs" id="seedance2VariantTabs" style="margin-top:0.4rem;"></nav>
+                        <div class="video-family-note seedance2-model-note" id="seedance2ModelNote"></div>
+
+                        <div id="seedance2ReferenceGroup" class="seedance2-reference-group" style="display:none;">
+                            <div class="seedance2-reference-tip" id="seedance2ReferenceTip" data-i18n="seedance2_reference_tip">
+                                Use @1 for image 1, @2 for image 2, @Video1 for video 1, and @Audio1 for audio 1.
+                            </div>
+                            <div class="settings-grid" style="margin-top:0.65rem;">
+                                <div class="field">
+                                    <label data-i18n="seedance2_label_reference_images">Reference Images (max 9)</label>
+                                    <div class="upload-zone small" id="seedance2RefImagesDropzone" onclick="document.getElementById('seedance2ReferenceImagesInput').click()">
+                                        <i data-lucide="images"></i>
+                                        <span id="seedance2RefImagesLabel" data-i18n="select_images">Select images</span>
+                                        <input id="seedance2ReferenceImagesInput" type="file" accept="image/*" multiple hidden />
+                                    </div>
+                                </div>
+                                <div class="field">
+                                    <label data-i18n="seedance2_label_reference_videos">Reference Videos (max 3)</label>
+                                    <div class="upload-zone small" id="seedance2RefVideosDropzone" onclick="document.getElementById('seedance2ReferenceVideosInput').click()">
+                                        <i data-lucide="film"></i>
+                                        <span id="seedance2RefVideosLabel" data-i18n="upload_video">Upload video</span>
+                                        <input id="seedance2ReferenceVideosInput" type="file" accept="video/*" multiple hidden />
+                                    </div>
+                                </div>
+                                <div class="field">
+                                    <label data-i18n="seedance2_label_reference_audio">Reference Audio (max 3)</label>
+                                    <div class="upload-zone small" id="seedance2RefAudiosDropzone" onclick="document.getElementById('seedance2ReferenceAudiosInput').click()">
+                                        <i data-lucide="music"></i>
+                                        <span id="seedance2RefAudiosLabel" data-i18n="select_audio">Select audio</span>
+                                        <input id="seedance2ReferenceAudiosInput" type="file" accept="audio/*" multiple hidden />
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="seedance2-reference-board" id="seedance2ReferenceTokenBoard"></div>
+                        </div>
+                    </div>
+
                     <div id="ltx23UploadGroup" class="section-block" style="display: none;">
                         <nav class="sub-tabs" id="ltx23FamilyTabs">
                             <button class="sub-tab active" type="button" onclick="switchLtx23Family('text-to-video')" id="ltx23family-text">
