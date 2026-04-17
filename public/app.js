@@ -7522,6 +7522,16 @@ function getFontPresetSources() {
 
 // ---- WB CARD PROMPT ASSEMBLY ----
 function assembleWbCardPrompt(productImageCount) {
+  const formatImageRange = (start, count) => {
+    if (!count || count < 1) return '';
+    return count === 1 ? `Image ${start}` : `Images ${start}-${start + count - 1}`;
+  };
+  const formatOrderedRole = (start, count, singularLabel, pluralLabel, tail) => {
+    if (!count || count < 1) return '';
+    const range = formatImageRange(start, count);
+    const label = count === 1 ? singularLabel : pluralLabel;
+    return `${range} - ${label}: ${tail}`;
+  };
   const title = (qs('toolsTitleInput') ? qs('toolsTitleInput').value.trim() : '') || 'Premium Quality';
   const charItems = document.querySelectorAll('.tools-char-item');
   const chars = [];
@@ -7550,35 +7560,60 @@ function assembleWbCardPrompt(productImageCount) {
 Ensure the background, scene styling, color palette, props, and decorative details match the product's overall style, material character, and brand mood so the final card feels cohesive.`
     : '';
 
-  const fontRefStart = prodCount + totalInspoCount + 1;
+  const fontRefStart = prodCount + 1;
+  const designRefStart = prodCount + fontPresetCount + 1;
+  const designReferenceAuthorityLine = hasFontPresetRefs
+    ? 'Copy the NON-TYPOGRAPHIC visual language from the design reference(s): background, scene, color palette, composition, layout, spacing, element positioning, icon style, frames, shadows, overlays, and decorative details outside the lettering itself. Use the design reference(s) for where text sits in the layout, not for how the headline letters should look.'
+    : 'Copy the full visual language from the design reference(s): background, scene, color palette, composition, layout, spacing, element positioning, typography treatment, icon style, text decoration, shadows, overlays, and decorative details. Reproduce the aesthetic faithfully.';
   const fontReferenceRolesBlock = hasFontPresetRefs
     ? `\n`
       + (fontPresetCount === 1
-          ? `Image ${fontRefStart} — FONT REFERENCE: This image is authority ONLY for typography styling.\n`
-          : `Images ${fontRefStart}–${fontRefStart + fontPresetCount - 1} — FONT REFERENCES: These images are authority ONLY for typography styling.\n`)
-      + `Copy the typographic DNA from the font reference(s): lettering personality, serif/sans structure, weight, contrast, proportions, spacing, uppercase/lowercase treatment, decorative finishes, embossing, metallic foil, outline, glow, shadow, bevel, texture, and headline styling mood.\nUse the font reference(s) ONLY for text styling. Do NOT copy their background, layout, product placement, or scene composition.`
+          ? `Image ${fontRefStart} - FONT STYLE GUIDE: This image is authority ONLY for headline typography styling.\n`
+          : `Images ${fontRefStart}-${fontRefStart + fontPresetCount - 1} - FONT STYLE GUIDES: These images are authority ONLY for headline typography styling.\n`)
+      + `Study the font reference(s) as typography style guides. Transfer the lettering system only: serif/sans construction, weight, width, stroke contrast, condensed/expanded feel, terminal shape, round vs sharp corners, slant, uppercase/lowercase treatment, tracking, decorative inline details, bevel, foil, embossing, glow, shadow, texture, and overall display mood.\nMatch the style family and finish, not the literal words from the reference. If multiple font references are present, follow the clearest shared direction instead of mixing unrelated styles.\nUse the font reference(s) ONLY for typography. Do NOT copy their background, layout, product placement, or scene composition.`
     : '';
   const fontDirectionBlock = hasFontPresetRefs
-    ? 'Use the uploaded font reference image(s) as the strongest authority for headline typography treatment. Keep the exact text content the user provided, but style that text to match the lettering language in the reference image(s). Keep body text clear and readable.'
-    : `HEADING TYPOGRAPHY STYLE: ${fontStyle}\nApply this style to the headline. Keep body feature text clean and readable.`;
+    ? 'Use the uploaded font reference image(s) as the strongest authority for headline typography treatment. Keep the exact text content the user provided, but style that text to match the lettering language in the reference image(s). Apply the strongest styling to the main headline; keep feature text simpler, harmonized, and highly readable.'
+    : `HEADING TYPOGRAPHY STYLE GUIDE: ${fontStyle}\nApply this style to the headline. Keep body feature text clean and readable.`;
+  const referencePriorityBlock = (() => {
+    const lines = ['═══ REFERENCE PRIORITY (follow strictly) ═══'];
+    if (prodCount > 0) {
+      lines.push(`1. ${formatOrderedRole(1, prodCount, 'PRODUCT PHOTO', 'PRODUCT PHOTOS', 'Use these as the source of truth for the product. Preserve exact shape, color, material, texture, proportions, and real-world scale.')}`);
+    }
+    if (hasFontPresetRefs) {
+      lines.push(`${lines.length}. ${formatOrderedRole(fontRefStart, fontPresetCount, 'FONT STYLE GUIDE', 'FONT STYLE GUIDES', 'Use these as the source of truth for headline lettering style and text effects only.')}`);
+    }
+    if (hasInspo) {
+      lines.push(`${lines.length}. ${formatOrderedRole(designRefStart, totalInspoCount, 'DESIGN REFERENCE', 'DESIGN REFERENCES', 'Use these as the source of truth for composition, layout, palette, background, decorative framing, and non-typographic visual language.')}`);
+    }
+    if (hasFontPresetRefs && hasInspo) {
+      lines.push('If the font reference(s) and design reference(s) disagree about typography, follow the font reference(s) for letterforms and text effects, and follow the design reference(s) for placement, composition, background, and overall art direction.');
+    }
+    if (prodCount > 0 && (hasFontPresetRefs || hasInspo)) {
+      lines.push('If any other reference conflicts with the product photo(s), preserve the product photo(s).');
+    }
+    return lines.join('\n');
+  })();
 
   if (hasInspo) {
     let imageRolesBlock = `═══ IMAGE ROLES (follow strictly) ═══\n`;
     if (prodCount > 0) {
       imageRolesBlock += (prodCount === 1
         ? 'Image 1 — PRODUCT PHOTO: Reproduce the product’s exact shape, color, material, and texture faithfully. Do NOT alter it.'
-        : `Images 1–${prodCount} — PRODUCT PHOTOS: Reproduce the product’s exact shape, color, material, and texture faithfully. Do NOT alter it.`) + '\n';
+        : `Images 1-${prodCount} - PRODUCT PHOTOS: Reproduce the product’s exact shape, color, material, and texture faithfully. Do NOT alter it.`) + '\n';
     }
+    if (hasFontPresetRefs) imageRolesBlock += fontReferenceRolesBlock + '\n';
     imageRolesBlock += (totalInspoCount === 1
-      ? `Image ${prodCount + 1} — DESIGN REFERENCE: This image is the sole authority for the entire visual design of the card.`
-      : `Images ${prodCount + 1}–${prodCount + totalInspoCount} — DESIGN REFERENCES: These images are the sole authority for the entire visual design of the card.`)
-      + '\nCopy EVERYTHING visual from the design reference(s): background, scene, color palette, mood, layout, composition, element positioning, spacing, typography (fonts, weights, sizes, placement), icon style, text decoration, shadows, overlays, and any decorative details. Reproduce the aesthetic faithfully.\nDo NOT take any products or objects from the design reference(s) — only transfer the visual design language.';
-    if (hasFontPresetRefs) imageRolesBlock += fontReferenceRolesBlock;
+      ? `Image ${designRefStart} - DESIGN REFERENCE: This image is the authority for the overall card art direction.`
+      : `Images ${designRefStart}-${designRefStart + totalInspoCount - 1} - DESIGN REFERENCES: These images are the authority for the overall card art direction.`)
+      + `\n${designReferenceAuthorityLine}\nDo NOT take products or literal objects from the design reference(s) - only transfer the intended visual language.`;
 
     return `Generate a premium e-commerce hero card for the Wildberries marketplace.
 
 ═══ CANVAS ═══
 Format: portrait 3:4 ratio. Quality: ultra-sharp, 4K resolution, award-winning composition, masterpiece.
+
+${referencePriorityBlock}
 
 ═══ PRODUCT RULES (critical — zero deviation) ═══
 • Do NOT alter the product’s shape, color, proportions, material, or texture in any way.
@@ -7593,9 +7628,10 @@ HEADLINE: "${title}"
 FEATURE LIST — each item paired with one unique icon:
 ${charsBlock}
 
-Place the headline, feature bullets, and icons exactly as the design reference(s) position such elements. Adapt contrast (overlays, shadows, color) from the reference’s approach so all text is legible.
+Place the headline, feature bullets, and icons exactly as the design reference(s) position such elements. Use the design reference(s) for size relationships, placement, spacing, panel treatment, and contrast strategy so all text is legible. Use the font reference(s), when present, for how the headline letters themselves should look.
 ${fontDirectionBlock}
-CRITICAL: Every text element must appear EXACTLY ONCE — never duplicate lines or icons.
+CRITICAL: Every text element must appear EXACTLY ONCE - never duplicate lines or icons.
+CRITICAL: Transfer font STYLE from the font reference(s), not the literal words shown inside those reference images.
 
 ═══ STRICTLY FORBIDDEN ═══
 ✗ Prices, discount tags, promo stickers, star ratings, barcodes
@@ -7637,7 +7673,7 @@ ${fontDirectionBlock}`;
   if (prodCount > 0 || hasFontPresetRefs) {
     imageRolesBlock = `\n\n═══ REFERENCE IMAGE ROLES (critical — follow strictly) ═══`;
     if (prodCount > 0) {
-      const prodRange = prodCount === 1 ? 'Image 1 is a' : `Images 1–${prodCount} are`;
+      const prodRange = prodCount === 1 ? 'Image 1 is a' : `Images 1-${prodCount} are`;
       imageRolesBlock += `\n${prodRange} PRODUCT PHOTO(S): Use these to understand the product’s exact appearance, shape, color, material, and texture. Reproduce the product faithfully.`;
     }
     if (hasFontPresetRefs) imageRolesBlock += fontReferenceRolesBlock;
@@ -7647,6 +7683,8 @@ ${fontDirectionBlock}`;
 
 ═══ CANVAS ═══
 Format: portrait 3:4 ratio. Style: photorealistic commercial product photography. Quality: ultra-sharp, 4K resolution, award-winning composition, cinematic lighting, masterpiece.
+
+${referencePriorityBlock}
 
 ═══ PRODUCT RULES (critical — zero deviation) ═══
 • The reference product photo is the source of truth. Do NOT alter the product’s shape, color, proportions, material, or texture in any way.
@@ -7825,16 +7863,16 @@ async function submitToolsRequest(task) {
   const body = { model_id: modelId, prompt: task.prompt };
 
   const imageUrls = await resolveUploadItemUrls(uploadedToolsImages, 'tools-ref', task);
-  const presetSources = getInspoPresetSources();
-  const presetUrls = await resolveUploadItemUrls(presetSources, 'tools-inspo-preset', task);
   const fontPresetSources = getFontPresetSources();
   const fontPresetUrls = await resolveUploadItemUrls(fontPresetSources, 'tools-font-preset', task);
+  const presetSources = getInspoPresetSources();
+  const presetUrls = await resolveUploadItemUrls(presetSources, 'tools-inspo-preset', task);
+  imageUrls.push(...fontPresetUrls);
   imageUrls.push(...presetUrls);
   for (const f of uploadedInspoImages) {
     const u = await uploadFileToFal(f, 'tools-inspo', task);
     if (u) imageUrls.push(u);
   }
-  imageUrls.push(...fontPresetUrls);
   if (imageUrls.length > 0) body.image_urls = imageUrls;
 
   if (!isGpt) {
