@@ -4676,7 +4676,7 @@ model-viewer {
 }
 .wiz-inspo-empty i { width: 20px; height: 20px; flex-shrink: 0; }
 .wiz-inspo-empty code { font-size: 0.6rem; opacity: 0.7; }
-.wiz-inspo-wrap { display: flex; flex-direction: column; gap: 0.3rem; }
+.wiz-inspo-wrap { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
 .wiz-inspo-view-btn {
     display: flex; align-items: center; justify-content: center; gap: 0.3rem;
     padding: 0.3rem 0.5rem;
@@ -4850,7 +4850,16 @@ model-viewer {
 @media (max-width: 480px) {
     .wiz-inspo-presets { grid-template-columns: repeat(2, 1fr); gap: 0.4rem; }
     .wiz-inspo-card { padding: 0.5rem 0.35rem; }
-    .wiz-inspo-card-name { font-size: 0.55rem; }
+    .wiz-inspo-card-name {
+        font-size: 0.55rem;
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        line-height: 1.18;
+        min-height: 1.8rem;
+    }
     .wiz-inspo-view-btn { font-size: 0.52rem; padding: 0.25rem 0.4rem; }
     .wiz-inspo-upload { font-size: 0.65rem; padding: 0.6rem; }
     .wiz-inspo-thumb { width: 52px; height: 52px; }
@@ -4860,6 +4869,23 @@ model-viewer {
 }
 @media (min-width: 769px) {
     .wiz-inspo-presets { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+}
+@media (hover: none), (pointer: coarse) {
+    .wiz-inspo-actions {
+        opacity: 1;
+    }
+    .wiz-inspo-action-btn {
+        background: rgba(10,10,12,0.88);
+    }
+    .wiz-inspo-card {
+        padding-top: 0.9rem;
+    }
+    .wiz-inspo-card:hover {
+        transform: none;
+    }
+    .wiz-inspo-card:hover::before {
+        opacity: 0;
+    }
 }
 .wiz-inspo-divider {
     display: flex; align-items: center; gap: 0.75rem;
@@ -4984,6 +5010,46 @@ model-viewer {
 .wiz-font-scroll-hint-line {
     display: none;
 }
+.wiz-font-preset-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding-top: 0.95rem;
+    border-top: 1px solid rgba(255,255,255,0.06);
+}
+.wiz-font-preset-head {
+    gap: 0.28rem;
+}
+.wiz-font-preset-head h4 {
+    margin: 0;
+    font-size: 0.86rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    color: var(--text);
+}
+.wiz-font-preset-head p {
+    margin: 0;
+    font-size: 0.68rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+    max-width: 48ch;
+}
+.wiz-font-presets .wiz-inspo-add-card {
+    min-height: 100%;
+}
+.wiz-font-presets .wiz-inspo-card-name {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    min-height: 1.95rem;
+    line-height: 1.2;
+}
+.wiz-font-presets .wiz-inspo-wrap {
+    min-width: 0;
+}
 /* Only on pointer devices (PC) — show scroll hint */
 @media (hover: hover) and (pointer: fine) {
     .wiz-font-scroll-hint-line {
@@ -5002,6 +5068,48 @@ model-viewer {
     /* Make font strip draggable-cursor on PC */
     .wiz-font-scroll { cursor: grab; }
     .wiz-font-scroll:active { cursor: grabbing; }
+}
+@media (max-width: 480px) {
+    .wiz-font-preset-section {
+        margin-top: 0.85rem;
+        padding-top: 0.85rem;
+        gap: 0.65rem;
+    }
+    .wiz-font-preset-head p {
+        font-size: 0.64rem;
+        max-width: none;
+    }
+    .wiz-font-presets {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.4rem;
+    }
+    .wiz-font-presets .wiz-inspo-card {
+        padding: 0.5rem 0.35rem;
+    }
+    .wiz-font-presets .wiz-inspo-card-name {
+        font-size: 0.55rem;
+        min-height: 1.8rem;
+    }
+    .wiz-font-presets .wiz-inspo-view-btn {
+        font-size: 0.52rem;
+        padding: 0.25rem 0.4rem;
+    }
+}
+@media (min-width: 481px) and (max-width: 768px) {
+    .wiz-font-presets {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+@media (hover: none), (pointer: coarse) {
+    .wiz-font-presets .wiz-inspo-actions {
+        opacity: 1;
+    }
+    .wiz-font-presets .wiz-inspo-action-btn {
+        background: rgba(10,10,12,0.88);
+    }
+    .wiz-font-presets .wiz-inspo-card {
+        padding-top: 0.9rem;
+    }
 }
 
 /* --- Wizard fullscreen layout --- */

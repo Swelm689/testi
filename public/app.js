@@ -5912,6 +5912,7 @@ function initToolsControls() {
   wizBuildCharChips();
   wizBuildFontCards();
   wizLoadInspoPresets();
+  wizLoadFontPresets();
   wizInitInspoUpload();
   wizUpdateToolsSettings();
   initToolsUtilityControls();
@@ -6667,6 +6668,9 @@ function updateToolsImagePreview() {
 let _wizInspoPresets = [];         // built-in presets from presets.json
 let _wizCustomPresets = [];        // user-added presets {id, name, dataUrl|src, addedAt|createdAt, storagePath}
 let _wizSelectedPresets = new Set();
+let _wizFontBuiltins = [];         // built-in font presets from presets.json
+let _wizFontCustomPresets = [];    // user-added font presets {id, name, dataUrl|src, addedAt|createdAt, storagePath}
+let _wizSelectedFontPresets = new Set();
 let _wizHiddenBuiltins = new Set(); // built-in preset IDs hidden by user
 let _wizPresetNameOverrides = {};   // {presetId: overriddenName}
 let uploadedInspoImages = [];       // kept for backwards compat
@@ -6676,8 +6680,80 @@ const INSPO_HIDDEN_KEY  = 'nano_inspo_hidden';
 const INSPO_NAMES_KEY   = 'nano_inspo_names';
 const INSPO_STATE_META_KEY = 'nano_inspo_state_meta';
 const INSPO_SELECTED_KEY = 'nano_inspo_selected';
+const FONT_SELECTED_KEY = 'nano_font_selected';
 const INSPO_IDB_NAME    = 'nano_custom_presets_db';
 const INSPO_IDB_STORE   = 'presets';
+const PRESET_BUCKET_INSPO = 'inspo';
+const PRESET_BUCKET_FONT = 'font';
+const FONT_PRESET_ID_PREFIX = 'fontpreset_';
+
+function normalizePresetBucket(bucket) {
+  return bucket === PRESET_BUCKET_FONT ? PRESET_BUCKET_FONT : PRESET_BUCKET_INSPO;
+}
+
+function isFontCustomPresetId(id) {
+  return String(id || '').startsWith(FONT_PRESET_ID_PREFIX);
+}
+
+function isUuidLike(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
+}
+
+function stableUuidFromString(value) {
+  const source = String(value || 'preset');
+  let h1 = 0x811c9dc5 >>> 0;
+  let h2 = 0x9e3779b9 >>> 0;
+  let h3 = 0x85ebca6b >>> 0;
+  let h4 = 0xc2b2ae35 >>> 0;
+  for (let i = 0; i < source.length; i += 1) {
+    const code = source.charCodeAt(i);
+    h1 = Math.imul(h1 ^ code, 16777619) >>> 0;
+    h2 = Math.imul(h2 ^ ((code << 7) | (code >>> 9)), 2246822519) >>> 0;
+    h3 = Math.imul(h3 ^ ((code << 11) | (code >>> 5)), 3266489917) >>> 0;
+    h4 = Math.imul(h4 ^ ((code << 15) | (code >>> 3)), 668265263) >>> 0;
+  }
+  const hex = [h1, h2, h3, h4].map((num) => (num >>> 0).toString(16).padStart(8, '0')).join('').slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function normalizeCustomPresetId(id, fallbackPrefix = 'preset') {
+  const raw = typeof id === 'string' ? id.trim() : '';
+  if (isUuidLike(raw)) return raw.toLowerCase();
+  if (raw) return stableUuidFromString(`${fallbackPrefix}:${raw}`);
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+  return stableUuidFromString(`${fallbackPrefix}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`);
+}
+
+function normalizeStoredCustomSelectionIds(stored, availableIds, fallbackPrefix) {
+  if (!Array.isArray(stored)) return [];
+  return stored
+    .map((id) => {
+      if (typeof id !== 'string') return null;
+      if (availableIds.has(id)) return id;
+      const normalized = normalizeCustomPresetId(id, fallbackPrefix);
+      return availableIds.has(normalized) ? normalized : null;
+    })
+    .filter(Boolean);
+}
+
+async function migratePresetCollectionIds(presets, bucket = PRESET_BUCKET_INSPO) {
+  const ownerKey = getInspoPresetOwnerKey();
+  const fallbackPrefix = bucket === PRESET_BUCKET_FONT ? 'font-preset' : 'custom-preset';
+  const normalized = (Array.isArray(presets) ? presets : []).map((preset) => {
+    if (!preset || typeof preset !== 'object') return null;
+    return {
+      ...preset,
+      id: normalizeCustomPresetId(preset.id, fallbackPrefix),
+      bucket: normalizePresetBucket(preset.bucket || bucket),
+      ownerKey: preset.ownerKey || ownerKey,
+    };
+  }).filter(Boolean);
+  const changed = normalized.some((preset, index) => preset.id !== String((presets[index] && presets[index].id) || ''));
+  if (changed) {
+    await _inspoIdbReplaceAllForOwner(ownerKey, normalized, bucket);
+  }
+  return normalized;
+}
 
 // --- IndexedDB helpers for custom presets ---
 function _inspoIdbOpen() {
@@ -6741,12 +6817,17 @@ function hasDesignPresetStateContent(state) {
     (Array.isArray(nextState.hiddenBuiltins) && nextState.hiddenBuiltins.length > 0)
     || (nextState.nameOverrides && typeof nextState.nameOverrides === 'object' && Object.keys(nextState.nameOverrides).length > 0)
     || (Array.isArray(nextState.customPresets) && nextState.customPresets.length > 0)
+    || (Array.isArray(nextState.fontCustomPresets) && nextState.fontCustomPresets.length > 0)
   );
 }
 
-async function _inspoIdbSave(preset) {
+async function _inspoIdbSave(preset, bucket = PRESET_BUCKET_INSPO) {
   const db = await _inspoIdbOpen();
-  const nextPreset = { ...preset, ownerKey: preset && preset.ownerKey ? preset.ownerKey : getInspoPresetOwnerKey() };
+  const nextPreset = {
+    ...preset,
+    bucket: normalizePresetBucket(preset && preset.bucket ? preset.bucket : bucket),
+    ownerKey: preset && preset.ownerKey ? preset.ownerKey : getInspoPresetOwnerKey(),
+  };
   return new Promise((res, rej) => {
     const tx = db.transaction(INSPO_IDB_STORE, 'readwrite');
     tx.objectStore(INSPO_IDB_STORE).put(nextPreset);
@@ -6763,34 +6844,42 @@ async function _inspoIdbDelete(id) {
     tx.onerror = rej;
   });
 }
-async function _inspoIdbLoadAll(explicitOwnerKey) {
+async function _inspoIdbLoadAll(explicitOwnerKey, bucket = PRESET_BUCKET_INSPO) {
   const db = await _inspoIdbOpen();
   return new Promise((res, rej) => {
     const tx = db.transaction(INSPO_IDB_STORE, 'readonly');
     const req = tx.objectStore(INSPO_IDB_STORE).getAll();
     req.onsuccess = () => {
       const ownerKey = getInspoPresetOwnerKey(explicitOwnerKey);
+      const normalizedBucket = normalizePresetBucket(bucket);
       const items = Array.isArray(req.result) ? req.result : [];
-      res(items.filter((item) => getInspoPresetOwnerKey(item && item.ownerKey ? item.ownerKey : null) === ownerKey));
+      res(items.filter((item) => (
+        getInspoPresetOwnerKey(item && item.ownerKey ? item.ownerKey : null) === ownerKey
+        && normalizePresetBucket(item && item.bucket ? item.bucket : PRESET_BUCKET_INSPO) === normalizedBucket
+      )));
     };
     req.onerror = rej;
   });
 }
-async function _inspoIdbReplaceAllForOwner(ownerKey, presets) {
+async function _inspoIdbReplaceAllForOwner(ownerKey, presets, bucket = PRESET_BUCKET_INSPO) {
   const db = await _inspoIdbOpen();
   return new Promise((res, rej) => {
     const tx = db.transaction(INSPO_IDB_STORE, 'readwrite');
     const store = tx.objectStore(INSPO_IDB_STORE);
+    const normalizedBucket = normalizePresetBucket(bucket);
     const req = store.getAll();
     req.onsuccess = () => {
       const all = Array.isArray(req.result) ? req.result : [];
       all.forEach((item) => {
-        if (getInspoPresetOwnerKey(item && item.ownerKey ? item.ownerKey : null) === ownerKey) {
+        if (
+          getInspoPresetOwnerKey(item && item.ownerKey ? item.ownerKey : null) === ownerKey
+          && normalizePresetBucket(item && item.bucket ? item.bucket : PRESET_BUCKET_INSPO) === normalizedBucket
+        ) {
           store.delete(item.id);
         }
       });
       (presets || []).forEach((preset) => {
-        store.put({ ...preset, ownerKey });
+        store.put({ ...preset, bucket: normalizedBucket, ownerKey });
       });
     };
     req.onerror = rej;
@@ -6810,6 +6899,17 @@ function getAvailableInspoPresetIds() {
     if (preset && preset.id && preset.thumb && !_wizHiddenBuiltins.has(preset.id)) ids.add(preset.id);
   });
   (_wizCustomPresets || []).forEach((preset) => {
+    if (preset && preset.id) ids.add(preset.id);
+  });
+  return ids;
+}
+
+function getAvailableFontPresetIds() {
+  const ids = new Set();
+  (_wizFontBuiltins || []).forEach((preset) => {
+    if (preset && preset.id && preset.thumb && !_wizHiddenBuiltins.has(preset.id)) ids.add(preset.id);
+  });
+  (_wizFontCustomPresets || []).forEach((preset) => {
     if (preset && preset.id) ids.add(preset.id);
   });
   return ids;
@@ -6840,12 +6940,34 @@ function restoreInspoSelectedPresets(explicitScope) {
     stored = [];
   }
   const availableIds = getAvailableInspoPresetIds();
-  const nextSelected = Array.isArray(stored)
-    ? stored.filter((id) => typeof id === 'string' && availableIds.has(id))
-    : [];
+  const nextSelected = normalizeStoredCustomSelectionIds(stored, availableIds, 'custom-preset');
   _wizSelectedPresets = new Set(nextSelected);
   if (Array.isArray(stored) && nextSelected.length !== stored.length) {
     persistInspoSelectedPresets(explicitScope);
+  }
+}
+
+function persistFontSelectedPresets(explicitScope) {
+  const availableIds = getAvailableFontPresetIds();
+  const nextSelected = Array.from(_wizSelectedFontPresets || []).filter((id) => availableIds.has(id));
+  _wizSelectedFontPresets = new Set(nextSelected);
+  try {
+    localStorage.setItem(getScopedStorageKey(FONT_SELECTED_KEY, explicitScope), JSON.stringify(nextSelected));
+  } catch (_) {}
+}
+
+function restoreFontSelectedPresets(explicitScope) {
+  let stored = [];
+  try {
+    stored = JSON.parse(localStorage.getItem(getScopedStorageKey(FONT_SELECTED_KEY, explicitScope)) || '[]');
+  } catch (_) {
+    stored = [];
+  }
+  const availableIds = getAvailableFontPresetIds();
+  const nextSelected = normalizeStoredCustomSelectionIds(stored, availableIds, 'font-preset');
+  _wizSelectedFontPresets = new Set(nextSelected);
+  if (Array.isArray(stored) && nextSelected.length !== stored.length) {
+    persistFontSelectedPresets(explicitScope);
   }
 }
 
@@ -6869,6 +6991,7 @@ async function wizLoadInspoPresets() {
   } catch(e) { console.warn('Failed to load built-in presets', e); }
   try {
     _wizCustomPresets = await _inspoIdbLoadAll();
+    _wizCustomPresets = await migratePresetCollectionIds(_wizCustomPresets, PRESET_BUCKET_INSPO);
     _wizCustomPresets.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
   } catch(e) { console.warn('Failed to load custom presets', e); }
   restoreInspoSelectedPresets();
@@ -6975,6 +7098,130 @@ function wizRenderInspoPresets() {
   requestAnimationFrame(() => { if (window.lucide) window.lucide.createIcons(); });
 }
 
+async function wizLoadFontPresets() {
+  inspoLoadLocalMeta();
+  try {
+    const res = await fetch('/font-presets/presets.json');
+    if (res.ok) _wizFontBuiltins = await res.json();
+    else _wizFontBuiltins = [];
+  } catch (e) {
+    _wizFontBuiltins = [];
+    console.warn('Failed to load built-in font presets', e);
+  }
+  try {
+    _wizFontCustomPresets = await _inspoIdbLoadAll(undefined, PRESET_BUCKET_FONT);
+    _wizFontCustomPresets = await migratePresetCollectionIds(_wizFontCustomPresets, PRESET_BUCKET_FONT);
+    _wizFontCustomPresets.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+  } catch (e) {
+    console.warn('Failed to load font presets', e);
+  }
+  restoreFontSelectedPresets();
+  wizRenderFontPresets();
+}
+
+function wizRenderFontPresets() {
+  const container = document.getElementById('wizFontPresets');
+  if (!container) return;
+  container.innerHTML = '';
+  const _t = (k, fb) => window.I18N ? I18N.t(k) : fb;
+
+  const cards = [
+    ...(_wizFontBuiltins || [])
+      .filter((preset) => preset && preset.id && preset.thumb && !_wizHiddenBuiltins.has(preset.id))
+      .map((preset) => ({
+        id: preset.id,
+        name: _wizPresetNameOverrides[preset.id] || preset.name || '',
+        src: preset.thumb.startsWith('http') ? preset.thumb : `${window.location.origin}${preset.thumb}`,
+        isCustom: false,
+      })),
+    ...(_wizFontCustomPresets || []).map((preset) => ({
+      id: preset.id,
+      name: preset.name || '',
+      src: preset.src || preset.dataUrl || '',
+      isCustom: true,
+    })).filter((preset) => preset.id && preset.src),
+  ];
+
+  cards.forEach((preset) => {
+    const isOn = _wizSelectedFontPresets.has(preset.id);
+    const wrap = document.createElement('div');
+    wrap.className = 'wiz-inspo-wrap';
+
+    const card = document.createElement('div');
+    card.className = 'wiz-inspo-card' + (isOn ? ' wiz-inspo-on' : '');
+    card.dataset.fontPresetId = preset.id;
+    card.title = preset.name;
+
+    const img = document.createElement('img');
+    img.className = 'wiz-inspo-card-thumb';
+    img.src = preset.src;
+    img.alt = preset.name;
+    img.loading = 'lazy';
+    card.appendChild(img);
+
+    const actions = document.createElement('div');
+    actions.className = 'wiz-inspo-actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'wiz-inspo-action-btn';
+    editBtn.title = 'Rename';
+    editBtn.innerHTML = '<i data-lucide="pencil"></i>';
+    actions.appendChild(editBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'wiz-inspo-action-btn wiz-inspo-del-btn';
+    delBtn.title = preset.isCustom ? 'Delete' : 'Hide';
+    delBtn.innerHTML = '<i data-lucide="trash-2"></i>';
+    delBtn.onclick = (e) => { e.stopPropagation(); fontDeletePreset(preset.id, preset.isCustom); };
+    actions.appendChild(delBtn);
+
+    card.appendChild(actions);
+
+    const check = document.createElement('div');
+    check.className = 'wiz-inspo-check';
+    check.innerHTML = '<i data-lucide="check"></i>';
+    card.appendChild(check);
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'wiz-inspo-card-name';
+    nameEl.textContent = preset.name;
+    card.appendChild(nameEl);
+    editBtn.onclick = (e) => { e.stopPropagation(); fontStartRename(preset.id, nameEl, preset.isCustom); };
+
+    card.onclick = () => {
+      if (_wizSelectedFontPresets.has(preset.id)) _wizSelectedFontPresets.delete(preset.id);
+      else _wizSelectedFontPresets.add(preset.id);
+      card.classList.toggle('wiz-inspo-on', _wizSelectedFontPresets.has(preset.id));
+      persistFontSelectedPresets();
+      saveAppState();
+    };
+
+    wrap.appendChild(card);
+
+    const viewBtn = document.createElement('button');
+    viewBtn.type = 'button';
+    viewBtn.className = 'wiz-inspo-view-btn';
+    viewBtn.innerHTML = `<i data-lucide="expand"></i><span>${_t('wiz_inspo_full_view', 'Full View')}</span>`;
+    viewBtn.onclick = (e) => { e.stopPropagation(); wizOpenLightbox(preset.src); };
+    wrap.appendChild(viewBtn);
+    container.appendChild(wrap);
+  });
+
+  const addWrap = document.createElement('div');
+  addWrap.className = 'wiz-inspo-wrap';
+  const addCard = document.createElement('button');
+  addCard.type = 'button';
+  addCard.className = 'wiz-inspo-add-card';
+  addCard.innerHTML = `<i data-lucide="image-plus"></i><span>${_t('wiz_font_add_preset', 'Add Font Preset')}</span>`;
+  addCard.onclick = () => fontPickAndAddPreset();
+  addWrap.appendChild(addCard);
+  container.appendChild(addWrap);
+
+  requestAnimationFrame(() => { if (window.lucide) window.lucide.createIcons(); });
+}
+
 // --- Add custom preset flow ---
 function inspoPickAndAddPreset() {
   const input = document.getElementById('wizInspoFileInput');
@@ -7016,7 +7263,9 @@ function inspoShowNameModal(dataUrl, suggestedName) {
   overlay.onclick = (e) => { if (e.target === overlay) cancel.onclick(); };
   save.onclick = async () => {
     const name = inp.value.trim() || suggestedName || 'Custom Preset';
-    const id = 'custom_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    const id = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : normalizeCustomPresetId('', 'custom-preset');
     const preset = { id, name, dataUrl, addedAt: Date.now(), ownerKey: getInspoPresetOwnerKey() };
     _wizCustomPresets.push(preset);
     try { await _inspoIdbSave(preset); } catch(e) { console.warn('Failed to save preset to IDB', e); }
@@ -7086,6 +7335,116 @@ async function inspoDeletePreset(id, isCustom) {
   saveAppState();
 }
 
+function fontPickAndAddPreset() {
+  const input = document.getElementById('wizFontPresetFileInput');
+  if (!input) return;
+  input.onchange = async (e) => {
+    const file = (e.target.files || [])[0];
+    if (!file) return;
+    e.target.value = '';
+    const dataUrl = await _fileToDataUrl(file);
+    const suggestedName = file.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ');
+    fontShowNameModal(dataUrl, suggestedName);
+  };
+  input.click();
+}
+
+function fontShowNameModal(dataUrl, suggestedName) {
+  const overlay = document.createElement('div');
+  overlay.className = 'inspo-name-overlay';
+  overlay.innerHTML = `
+    <div class="inspo-name-modal">
+      <img src="${dataUrl}" class="inspo-name-preview" alt="" />
+      <div class="inspo-name-body">
+        <div class="inspo-name-label">${escapeHtml(toolsUiText('wiz_font_modal_title', 'Name your font preset'))}</div>
+        <input type="text" class="inspo-name-input" value="${escapeHtml(suggestedName)}" placeholder="${escapeHtml(toolsUiText('wiz_font_modal_placeholder', 'e.g. Luxury gold serif...'))}" maxlength="50" />
+        <div class="inspo-name-actions">
+          <button type="button" class="inspo-name-cancel">${escapeHtml(toolsUiText('cancel', 'Cancel'))}</button>
+          <button type="button" class="inspo-name-save"><i data-lucide="check"></i> ${escapeHtml(toolsUiText('wiz_font_modal_save', 'Save Font Preset'))}</button>
+        </div>
+      </div>
+    </div>`;
+  const inp = overlay.querySelector('.inspo-name-input');
+  const save = overlay.querySelector('.inspo-name-save');
+  const cancel = overlay.querySelector('.inspo-name-cancel');
+  cancel.onclick = () => { overlay.classList.remove('inspo-name-open'); setTimeout(() => overlay.remove(), 220); };
+  overlay.onclick = (e) => { if (e.target === overlay) cancel.onclick(); };
+  save.onclick = async () => {
+    const name = inp.value.trim() || suggestedName || 'Font Preset';
+    const id = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : normalizeCustomPresetId('', 'font-preset');
+    const preset = { id, name, dataUrl, addedAt: Date.now(), ownerKey: getInspoPresetOwnerKey(), bucket: PRESET_BUCKET_FONT };
+    _wizFontCustomPresets.push(preset);
+    try { await _inspoIdbSave(preset, PRESET_BUCKET_FONT); } catch (e) { console.warn('Failed to save font preset to IDB', e); }
+    markInspoLocalStateDirty();
+    persistFontSelectedPresets();
+    cancel.onclick();
+    wizRenderFontPresets();
+    saveAppState();
+    showToast(`Preset "${name}" saved`, 'info');
+  };
+  inp.onkeydown = (e) => { if (e.key === 'Enter') save.onclick(); if (e.key === 'Escape') cancel.onclick(); };
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => {
+    overlay.classList.add('inspo-name-open');
+    if (window.lucide) window.lucide.createIcons();
+    inp.focus();
+    inp.select();
+  });
+}
+
+function fontStartRename(id, nameEl, isCustom) {
+  const current = nameEl.textContent;
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'wiz-inspo-rename-input';
+  inp.value = current;
+  inp.maxLength = 50;
+  const finish = async (save) => {
+    const newName = inp.value.trim() || current;
+    nameEl.textContent = save ? newName : current;
+    inp.replaceWith(nameEl);
+    if (!save) return;
+    if (isCustom) {
+      const preset = _wizFontCustomPresets.find((item) => item.id === id);
+      if (preset) {
+        preset.name = newName;
+        try { await _inspoIdbSave(preset, PRESET_BUCKET_FONT); } catch (_) {}
+        markInspoLocalStateDirty();
+      }
+    } else {
+      _wizPresetNameOverrides[id] = newName;
+      inspoSaveLocalMeta();
+    }
+  };
+  inp.onblur = () => finish(true);
+  inp.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+    if (e.key === 'Escape') finish(false);
+  };
+  nameEl.replaceWith(inp);
+  inp.focus();
+  inp.select();
+}
+
+async function fontDeletePreset(id, isCustom) {
+  if (isCustom) {
+    const idx = _wizFontCustomPresets.findIndex((preset) => preset.id === id);
+    if (idx !== -1) _wizFontCustomPresets.splice(idx, 1);
+    try { await _inspoIdbDelete(id); } catch (e) { console.warn('Failed to delete font preset from IDB', e); }
+  } else {
+    _wizHiddenBuiltins.add(id);
+  }
+  _wizSelectedFontPresets.delete(id);
+  delete _wizPresetNameOverrides[id];
+  markInspoLocalStateDirty();
+  inspoSaveLocalMeta();
+  persistFontSelectedPresets();
+  wizRenderFontPresets();
+  saveAppState();
+}
+
 function wizOpenLightbox(src) {
   const lb = document.getElementById('wizLightbox');
   const img = document.getElementById('wizLightboxImg');
@@ -7134,6 +7493,33 @@ function getInspoPresetSources() {
   return sources.filter(Boolean);
 }
 
+function getFontPresetSources() {
+  const sources = [];
+  _wizSelectedFontPresets.forEach((id) => {
+    const builtin = _wizFontBuiltins.find((item) => item.id === id);
+    if (builtin && builtin.thumb && !_wizHiddenBuiltins.has(id)) {
+      const absoluteUrl = builtin.thumb.startsWith('http') ? builtin.thumb : `${window.location.origin}${builtin.thumb}`;
+      sources.push(createRemoteAssetItem({
+        url: absoluteUrl,
+        type: 'image',
+        filename: deriveFilenameFromUrl(absoluteUrl, 'jpg'),
+      }));
+      return;
+    }
+    const preset = _wizFontCustomPresets.find((item) => item.id === id);
+    if (!preset) return;
+    const src = preset.src || preset.dataUrl || null;
+    if (!src) return;
+    sources.push(createRemoteAssetItem({
+      url: src,
+      type: 'image',
+      filename: `${preset.name || preset.id || 'font-preset'}.png`,
+      mimeHint: 'image/png',
+    }));
+  });
+  return sources.filter(Boolean);
+}
+
 // ---- WB CARD PROMPT ASSEMBLY ----
 function assembleWbCardPrompt(productImageCount) {
   const title = (qs('toolsTitleInput') ? qs('toolsTitleInput').value.trim() : '') || 'Premium Quality';
@@ -7146,14 +7532,16 @@ function assembleWbCardPrompt(productImageCount) {
   const fontStyle = (qs('toolsFontInput') ? qs('toolsFontInput').value.trim() : '') || 'Bold minimalist sans-serif';
   const wishes = (qs('toolsWishesInput') ? qs('toolsWishesInput').value.trim() : '') || '';
   const charsBlock = chars.length > 0
-    ? chars.map(c => `  \u2022 ${c}`).join('\n')
-    : '  \u2022 Natural materials\n  \u2022 Premium quality\n  \u2022 Guaranteed';
+    ? chars.map(c => `  • ${c}`).join('\n')
+    : '  • Natural materials\n  • Premium quality\n  • Guaranteed';
   const textOverlays = skGetTextOverlaysForPrompt();
   const inspoPresetCount = getInspoPresetSources().length;
   const inspoUploadCount = uploadedInspoImages.length;
   const totalInspoCount = inspoPresetCount + inspoUploadCount;
+  const fontPresetCount = getFontPresetSources().length;
   const prodCount = productImageCount || 0;
   const hasInspo = totalInspoCount > 0;
+  const hasFontPresetRefs = fontPresetCount > 0;
   const alignBgWithProductStyle = !!(qs('toolsInspoMatchBg') && qs('toolsInspoMatchBg').checked);
   const bgStyleHarmonyBlock = alignBgWithProductStyle
     ? `
@@ -7162,99 +7550,109 @@ function assembleWbCardPrompt(productImageCount) {
 Ensure the background, scene styling, color palette, props, and decorative details match the product's overall style, material character, and brand mood so the final card feels cohesive.`
     : '';
 
-  // ── WITH DESIGN REFERENCES: lean prompt — only user content + aesthetic directive ──
+  const fontRefStart = prodCount + totalInspoCount + 1;
+  const fontReferenceRolesBlock = hasFontPresetRefs
+    ? `\n`
+      + (fontPresetCount === 1
+          ? `Image ${fontRefStart} — FONT REFERENCE: This image is authority ONLY for typography styling.\n`
+          : `Images ${fontRefStart}–${fontRefStart + fontPresetCount - 1} — FONT REFERENCES: These images are authority ONLY for typography styling.\n`)
+      + `Copy the typographic DNA from the font reference(s): lettering personality, serif/sans structure, weight, contrast, proportions, spacing, uppercase/lowercase treatment, decorative finishes, embossing, metallic foil, outline, glow, shadow, bevel, texture, and headline styling mood.\nUse the font reference(s) ONLY for text styling. Do NOT copy their background, layout, product placement, or scene composition.`
+    : '';
+  const fontDirectionBlock = hasFontPresetRefs
+    ? 'Use the uploaded font reference image(s) as the strongest authority for headline typography treatment. Keep the exact text content the user provided, but style that text to match the lettering language in the reference image(s). Keep body text clear and readable.'
+    : `HEADING TYPOGRAPHY STYLE: ${fontStyle}\nApply this style to the headline. Keep body feature text clean and readable.`;
+
   if (hasInspo) {
-    const prodRolesBlock = prodCount > 0
-      ? `\u2550\u2550\u2550 IMAGE ROLES (follow strictly) \u2550\u2550\u2550\n`
-        + (prodCount === 1
-            ? `Image 1 \u2014 PRODUCT PHOTO: Reproduce the product\u2019s exact shape, color, material, and texture faithfully. Do NOT alter it.`
-            : `Images 1\u2013${prodCount} \u2014 PRODUCT PHOTOS: Reproduce the product\u2019s exact shape, color, material, and texture faithfully. Do NOT alter it.`)
-        + `\n`
-        + (totalInspoCount === 1
-            ? `Image ${prodCount + 1} \u2014 DESIGN REFERENCE: This image is the sole authority for the entire visual design of the card.`
-            : `Images ${prodCount + 1}\u2013${prodCount + totalInspoCount} \u2014 DESIGN REFERENCES: These images are the sole authority for the entire visual design of the card.`)
-        + `\nCopy EVERYTHING visual from the design reference(s): background, scene, color palette, mood, layout, composition, element positioning, spacing, typography (fonts, weights, sizes, placement), icon style, text decoration, shadows, overlays, and any decorative details. Reproduce the aesthetic faithfully.\nDo NOT take any products or objects from the design reference(s) \u2014 only transfer the visual design language.`
-      : `\u2550\u2550\u2550 IMAGE ROLES (follow strictly) \u2550\u2550\u2550\n`
-        + (totalInspoCount === 1
-            ? `Image 1 \u2014 DESIGN REFERENCE: This image is the sole authority for the entire visual design of the card.`
-            : `Images 1\u2013${totalInspoCount} \u2014 DESIGN REFERENCES: These images are the sole authority for the entire visual design of the card.`)
-        + `\nCopy EVERYTHING visual from the design reference(s): background, scene, color palette, mood, layout, composition, element positioning, spacing, typography (fonts, weights, sizes, placement), icon style, text decoration, shadows, overlays, and any decorative details. Reproduce the aesthetic faithfully.`;
+    let imageRolesBlock = `═══ IMAGE ROLES (follow strictly) ═══\n`;
+    if (prodCount > 0) {
+      imageRolesBlock += (prodCount === 1
+        ? 'Image 1 — PRODUCT PHOTO: Reproduce the product’s exact shape, color, material, and texture faithfully. Do NOT alter it.'
+        : `Images 1–${prodCount} — PRODUCT PHOTOS: Reproduce the product’s exact shape, color, material, and texture faithfully. Do NOT alter it.`) + '\n';
+    }
+    imageRolesBlock += (totalInspoCount === 1
+      ? `Image ${prodCount + 1} — DESIGN REFERENCE: This image is the sole authority for the entire visual design of the card.`
+      : `Images ${prodCount + 1}–${prodCount + totalInspoCount} — DESIGN REFERENCES: These images are the sole authority for the entire visual design of the card.`)
+      + '\nCopy EVERYTHING visual from the design reference(s): background, scene, color palette, mood, layout, composition, element positioning, spacing, typography (fonts, weights, sizes, placement), icon style, text decoration, shadows, overlays, and any decorative details. Reproduce the aesthetic faithfully.\nDo NOT take any products or objects from the design reference(s) — only transfer the visual design language.';
+    if (hasFontPresetRefs) imageRolesBlock += fontReferenceRolesBlock;
 
     return `Generate a premium e-commerce hero card for the Wildberries marketplace.
 
-\u2550\u2550\u2550 CANVAS \u2550\u2550\u2550
+═══ CANVAS ═══
 Format: portrait 3:4 ratio. Quality: ultra-sharp, 4K resolution, award-winning composition, masterpiece.
 
-\u2550\u2550\u2550 PRODUCT RULES (critical \u2014 zero deviation) \u2550\u2550\u2550
-\u2022 Do NOT alter the product\u2019s shape, color, proportions, material, or texture in any way.
-\u2022 Do NOT add text, logos, or extra details directly ON or TO the product itself.
-\u2022 Product occupies 30\u201355% of the image area \u2014 realistic physical scale.
-\u2022 Product is physically grounded: accurate contact shadows, stable base, believable perspective.
+═══ PRODUCT RULES (critical — zero deviation) ═══
+• Do NOT alter the product’s shape, color, proportions, material, or texture in any way.
+• Do NOT add text, logos, or extra details directly ON or TO the product itself.
+• Product occupies 30–55% of the image area — realistic physical scale.
+• Product is physically grounded: accurate contact shadows, stable base, believable perspective.
 
-${prodRolesBlock}
+${imageRolesBlock}
 
-\u2550\u2550\u2550 TEXT CONTENT (reproduce exactly \u2014 validate spelling character by character) \u2550\u2550\u2550
+═══ TEXT CONTENT (reproduce exactly — validate spelling character by character) ═══
 HEADLINE: "${title}"
-FEATURE LIST \u2014 each item paired with one unique icon:
+FEATURE LIST — each item paired with one unique icon:
 ${charsBlock}
 
-Place the headline, feature bullets, and icons exactly as the design reference(s) position such elements. Adapt contrast (overlays, shadows, color) from the reference\u2019s approach so all text is legible.
-CRITICAL: Every text element must appear EXACTLY ONCE \u2014 never duplicate lines or icons.
+Place the headline, feature bullets, and icons exactly as the design reference(s) position such elements. Adapt contrast (overlays, shadows, color) from the reference’s approach so all text is legible.
+${fontDirectionBlock}
+CRITICAL: Every text element must appear EXACTLY ONCE — never duplicate lines or icons.
 
-\u2550\u2550\u2550 STRICTLY FORBIDDEN \u2550\u2550\u2550
-\u2717 Prices, discount tags, promo stickers, star ratings, barcodes
-\u2717 Logos, watermarks, Wildberries or WB brand marks anywhere
+═══ STRICTLY FORBIDDEN ═══
+✗ Prices, discount tags, promo stickers, star ratings, barcodes
+✗ Logos, watermarks, Wildberries or WB brand marks anywhere
 
-\u2550\u2550\u2550 QUALITY \u2550\u2550\u2550
-ultra-sharp \u00b7 4K detail \u00b7 cinematic lighting \u00b7 premium composition \u00b7 masterpiece${bgStyleHarmonyBlock}${wishes ? `\n\n\u2550\u2550\u2550 ADDITIONAL WISHES \u2550\u2550\u2550\n${wishes}` : ''}${textOverlays ? `\n\n\u2550\u2550\u2550 ADDITIONAL TEXT TO RENDER (reproduce exactly as written) \u2550\u2550\u2550\n${textOverlays}` : ''}`;
+═══ QUALITY ═══
+ultra-sharp · 4K detail · cinematic lighting · premium composition · masterpiece${bgStyleHarmonyBlock}${wishes ? `\n\n═══ ADDITIONAL WISHES ═══\n${wishes}` : ''}${textOverlays ? `\n\n═══ ADDITIONAL TEXT TO RENDER (reproduce exactly as written) ═══\n${textOverlays}` : ''}`;
   }
 
-  // ── WITHOUT DESIGN REFERENCES: full default prompt ──
-  const sceneBlock = `\u2550\u2550\u2550 SCENE \u2550\u2550\u2550
-Full-background lifestyle scene thematically matched to the product \u2014 NOT a flat studio cutout or template banner.
+  const sceneBlock = `═══ SCENE ═══
+Full-background lifestyle scene thematically matched to the product — NOT a flat studio cutout or template banner.
 Shot: medium to medium-close. Composition: rule of thirds with product as clear focal point.
-Lighting: professional studio-lifestyle blend \u2014 soft diffused key light, warm subtle fill, clean sharp shadows, slight depth of field (product sharp, background slightly soft).
+Lighting: professional studio-lifestyle blend — soft diffused key light, warm subtle fill, clean sharp shadows, slight depth of field (product sharp, background slightly soft).
 Include scale-anchoring context objects (table / shelf / hands / interior surfaces) so the product size reads naturally.
 
-Scene type \u2014 apply whichever matches the product:
-\u2192 Wearable / accessory / clothing \u2192 shown worn on person or mannequin; face optional; product is hero
-\u2192 Kitchenware / cookware / food \u2192 elegant table or kitchen scene, real-world scale
-\u2192 Cosmetics / beauty / skincare \u2192 vanity or bathroom surface, no competitor branding
-\u2192 Electronics / gadgets \u2192 active-use scenario (desk / hands / home), no third-party logos
-\u2192 Home d\u00e9cor / furniture / textiles \u2192 interior scene where scale reads naturally`;
+Scene type — apply whichever matches the product:
+→ Wearable / accessory / clothing → shown worn on person or mannequin; face optional; product is hero
+→ Kitchenware / cookware / food → elegant table or kitchen scene, real-world scale
+→ Cosmetics / beauty / skincare → vanity or bathroom surface, no competitor branding
+→ Electronics / gadgets → active-use scenario (desk / hands / home), no third-party logos
+→ Home décor / furniture / textiles → interior scene where scale reads naturally`;
 
-  const textBlock = `\u2550\u2550\u2550 TEXT ON CARD (spelling must be perfect \u2014 validate character by character) \u2550\u2550\u2550
-HEADLINE \u2014 positioned at the TOP CENTER, bold, large, single line. Text reading exactly:
+  const textBlock = `═══ TEXT ON CARD (spelling must be perfect — validate character by character) ═══
+HEADLINE — positioned at the TOP CENTER, bold, large, single line. Text reading exactly:
 "${title}"
 
-FEATURE BULLETS \u2014 placed on LEFT and RIGHT sides of the card, each with a small icon. Feature list:
+FEATURE BULLETS — placed on LEFT and RIGHT sides of the card, each with a small icon. Feature list:
 ${charsBlock}
 
-CRITICAL: Every text element must appear EXACTLY ONCE \u2014 never duplicate lines, numbers, or icons.
-CRITICAL: All text must be maximum legible \u2014 strong contrast between text and background at all times. Use white or accent-colored text on dark semi-transparent overlay panels where needed.`;
+CRITICAL: Every text element must appear EXACTLY ONCE — never duplicate lines, numbers, or icons.
+CRITICAL: All text must be maximum legible — strong contrast between text and background at all times. Use white or accent-colored text on dark semi-transparent overlay panels where needed.`;
 
-  const iconAndTypoBlock = `\u2550\u2550\u2550 ICON & TYPOGRAPHY STYLE \u2550\u2550\u2550
+  const iconAndTypoBlock = `═══ ICON & TYPOGRAPHY STYLE ═══
 Icons: Each feature bullet should have ONE small icon that matches its text. All icons must follow a unified stylistic approach. Be very creative with icon design.
 
-HEADING TYPOGRAPHY STYLE: ${fontStyle}
-Apply this style to the headline. Keep body feature text clean and readable.`;
+${fontDirectionBlock}`;
 
   let imageRolesBlock = '';
-  if (prodCount > 0) {
-    const prodRange = prodCount === 1 ? 'Image 1 is a' : `Images 1\u2013${prodCount} are`;
-    imageRolesBlock = `\n\n\u2550\u2550\u2550 REFERENCE IMAGE ROLES (critical \u2014 follow strictly) \u2550\u2550\u2550\n${prodRange} PRODUCT PHOTO(S): Use these to understand the product\u2019s exact appearance, shape, color, material, and texture. Reproduce the product faithfully.`;
+  if (prodCount > 0 || hasFontPresetRefs) {
+    imageRolesBlock = `\n\n═══ REFERENCE IMAGE ROLES (critical — follow strictly) ═══`;
+    if (prodCount > 0) {
+      const prodRange = prodCount === 1 ? 'Image 1 is a' : `Images 1–${prodCount} are`;
+      imageRolesBlock += `\n${prodRange} PRODUCT PHOTO(S): Use these to understand the product’s exact appearance, shape, color, material, and texture. Reproduce the product faithfully.`;
+    }
+    if (hasFontPresetRefs) imageRolesBlock += fontReferenceRolesBlock;
   }
 
-  return `Generate a premium e-commerce hero card for the Wildberries marketplace. This is a structured reasoning task \u2014 follow every requirement explicitly and precisely.
+  return `Generate a premium e-commerce hero card for the Wildberries marketplace. This is a structured reasoning task — follow every requirement explicitly and precisely.
 
-\u2550\u2550\u2550 CANVAS \u2550\u2550\u2550
+═══ CANVAS ═══
 Format: portrait 3:4 ratio. Style: photorealistic commercial product photography. Quality: ultra-sharp, 4K resolution, award-winning composition, cinematic lighting, masterpiece.
 
-\u2550\u2550\u2550 PRODUCT RULES (critical \u2014 zero deviation) \u2550\u2550\u2550
-\u2022 The reference product photo is the source of truth. Do NOT alter the product\u2019s shape, color, proportions, material, or texture in any way.
-\u2022 Do NOT add text, logos, branding, or extra details directly ON or TO the product itself.
-\u2022 Product occupies 30\u201355% of the image area \u2014 realistic physical scale, never oversized or miniaturized.
-\u2022 Product is physically grounded: accurate contact shadows, stable base point, believable perspective with surroundings.
+═══ PRODUCT RULES (critical — zero deviation) ═══
+• The reference product photo is the source of truth. Do NOT alter the product’s shape, color, proportions, material, or texture in any way.
+• Do NOT add text, logos, branding, or extra details directly ON or TO the product itself.
+• Product occupies 30–55% of the image area — realistic physical scale, never oversized or miniaturized.
+• Product is physically grounded: accurate contact shadows, stable base point, believable perspective with surroundings.
 
 ${sceneBlock}
 
@@ -7262,12 +7660,12 @@ ${textBlock}
 
 ${iconAndTypoBlock}
 
-\u2550\u2550\u2550 STRICTLY FORBIDDEN \u2550\u2550\u2550
-\u2717 Prices, discount tags, promo stickers, star ratings, barcodes
-\u2717 Logos, watermarks, Wildberries or WB brand marks anywhere
+═══ STRICTLY FORBIDDEN ═══
+✗ Prices, discount tags, promo stickers, star ratings, barcodes
+✗ Logos, watermarks, Wildberries or WB brand marks anywhere
 
-\u2550\u2550\u2550 QUALITY DIRECTIVES \u2550\u2550\u2550
-photorealistic \u00b7 award-winning product photography \u00b7 ultra-sharp focus on product \u00b7 4K detail \u00b7 cinematic lighting \u00b7 premium composition \u00b7 masterpiece \u00b7 high fidelity${imageRolesBlock}${bgStyleHarmonyBlock}${wishes ? `\n\n\u2550\u2550\u2550 USER REQUESTS (important) \u2550\u2550\u2550\n${wishes}` : ''}${textOverlays ? `\n\n\u2550\u2550\u2550 ADDITIONAL TEXT TO RENDER (user specified \u2014 reproduce exactly as written) \u2550\u2550\u2550\n${textOverlays}` : ''}`;
+═══ QUALITY DIRECTIVES ═══
+photorealistic · award-winning product photography · ultra-sharp focus on product · 4K detail · cinematic lighting · premium composition · masterpiece · high fidelity${imageRolesBlock}${bgStyleHarmonyBlock}${wishes ? `\n\n═══ USER REQUESTS (important) ═══\n${wishes}` : ''}${textOverlays ? `\n\n═══ ADDITIONAL TEXT TO RENDER (user specified — reproduce exactly as written) ═══\n${textOverlays}` : ''}`;
 }
 
 async function submitToolsRequest(task) {
@@ -7429,11 +7827,14 @@ async function submitToolsRequest(task) {
   const imageUrls = await resolveUploadItemUrls(uploadedToolsImages, 'tools-ref', task);
   const presetSources = getInspoPresetSources();
   const presetUrls = await resolveUploadItemUrls(presetSources, 'tools-inspo-preset', task);
+  const fontPresetSources = getFontPresetSources();
+  const fontPresetUrls = await resolveUploadItemUrls(fontPresetSources, 'tools-font-preset', task);
   imageUrls.push(...presetUrls);
   for (const f of uploadedInspoImages) {
     const u = await uploadFileToFal(f, 'tools-inspo', task);
     if (u) imageUrls.push(u);
   }
+  imageUrls.push(...fontPresetUrls);
   if (imageUrls.length > 0) body.image_urls = imageUrls;
 
   if (!isGpt) {
@@ -11474,6 +11875,8 @@ function hookPersistence() {
 function refreshLocalizedDynamicUi() {
   closeToolsHelpPopover();
   initTopazHelpButtons();
+  wizRenderInspoPresets();
+  wizRenderFontPresets();
   refreshAllManagedUploads();
   updateSeedance2ReferenceUi();
   refreshToolsUtilitySourceUi();
@@ -11569,8 +11972,9 @@ function normalizePresetCreatedAt(value) {
 
 function normalizeCustomPresetForState(preset) {
   if (!preset) return null;
+  const fallbackPrefix = isFontCustomPresetId(preset.id) || preset.bucket === PRESET_BUCKET_FONT ? 'font-preset' : 'custom-preset';
   return {
-    id: preset.id,
+    id: normalizeCustomPresetId(preset.id, fallbackPrefix),
     name: preset.name || 'Custom Preset',
     dataUrl: preset.dataUrl || null,
     src: preset.src || preset.dataUrl || null,
@@ -11584,11 +11988,12 @@ function getDesignPresetStateSnapshot() {
     hiddenBuiltins: [..._wizHiddenBuiltins],
     nameOverrides: { ..._wizPresetNameOverrides },
     customPresets: _wizCustomPresets.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean),
+    fontCustomPresets: _wizFontCustomPresets.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean),
   };
 }
 
-async function getLegacyCustomPresets() {
-  const items = await _inspoIdbLoadAll('__guest__');
+async function getLegacyCustomPresets(bucket = PRESET_BUCKET_INSPO) {
+  const items = await _inspoIdbLoadAll('__guest__', bucket);
   return items.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean);
 }
 
@@ -11604,7 +12009,8 @@ async function getLegacyMigrationPayload() {
   const hiddenBuiltinsRaw = readStoredJson(INSPO_HIDDEN_KEY, []);
   const hiddenBuiltins = Array.isArray(hiddenBuiltinsRaw) ? hiddenBuiltinsRaw : [];
   const nameOverrides = readStoredJson(INSPO_NAMES_KEY, {});
-  const customPresets = await getLegacyCustomPresets();
+  const customPresets = await getLegacyCustomPresets(PRESET_BUCKET_INSPO);
+  const fontCustomPresets = await getLegacyCustomPresets(PRESET_BUCKET_FONT);
   return {
     history: Array.isArray(historyItems) ? historyItems : [],
     titleStore,
@@ -11613,14 +12019,16 @@ async function getLegacyMigrationPayload() {
       hiddenBuiltins,
       nameOverrides: nameOverrides && typeof nameOverrides === 'object' ? nameOverrides : {},
       customPresets,
+      fontCustomPresets,
     },
   };
 }
 
 async function clearLegacyMigrationData(markerUserId) {
-  ['nano_history', 'nano_tasks', TITLE_PRESETS_KEY, CHAR_PRESETS_KEY, INSPO_HIDDEN_KEY, INSPO_NAMES_KEY, INSPO_STATE_META_KEY, INSPO_SELECTED_KEY].forEach((key) => localStorage.removeItem(key));
+  ['nano_history', 'nano_tasks', TITLE_PRESETS_KEY, CHAR_PRESETS_KEY, INSPO_HIDDEN_KEY, INSPO_NAMES_KEY, INSPO_STATE_META_KEY, INSPO_SELECTED_KEY, FONT_SELECTED_KEY].forEach((key) => localStorage.removeItem(key));
   try {
-    await _inspoIdbReplaceAllForOwner('__guest__', []);
+    await _inspoIdbReplaceAllForOwner('__guest__', [], PRESET_BUCKET_INSPO);
+    await _inspoIdbReplaceAllForOwner('__guest__', [], PRESET_BUCKET_FONT);
   } catch (error) {
     console.warn('Failed to clear guest design preset cache', error);
   }
@@ -11647,16 +12055,25 @@ async function applyDesignPresetState(state) {
     _wizCustomPresets = (Array.isArray(nextState.customPresets) ? nextState.customPresets : []).map((preset) => ({
       ...normalizeCustomPresetForState(preset),
       ownerKey,
+      bucket: PRESET_BUCKET_INSPO,
+    })).filter(Boolean);
+    _wizFontCustomPresets = (Array.isArray(nextState.fontCustomPresets) ? nextState.fontCustomPresets : []).map((preset) => ({
+      ...normalizeCustomPresetForState(preset),
+      ownerKey,
+      bucket: PRESET_BUCKET_FONT,
     })).filter(Boolean);
     inspoSaveLocalMeta({ markDirty: false });
     restoreInspoSelectedPresets();
+    restoreFontSelectedPresets();
   });
   try {
-    await _inspoIdbReplaceAllForOwner(ownerKey, _wizCustomPresets);
+    await _inspoIdbReplaceAllForOwner(ownerKey, _wizCustomPresets, PRESET_BUCKET_INSPO);
+    await _inspoIdbReplaceAllForOwner(ownerKey, _wizFontCustomPresets, PRESET_BUCKET_FONT);
   } catch (error) {
     console.warn('Failed to cache scoped design presets', error);
   }
   wizRenderInspoPresets();
+  wizRenderFontPresets();
 }
 
 function mergePersistedHistoryItems(localItems, savedItems) {
@@ -11714,6 +12131,9 @@ function setAccountStorageScope(userId, options = {}) {
     wizLoadInspoPresets().catch((error) => {
       console.warn('Failed to refresh inspiration presets for storage scope', error);
     });
+    wizLoadFontPresets().catch((error) => {
+      console.warn('Failed to refresh font presets for storage scope', error);
+    });
   }
   if (options.loadHistory) replaceHistoryFromAccount(loadStoredArray('nano_history'));
   if (options.loadTasks !== false) replaceTasksFromScopedStorage();
@@ -11739,8 +12159,10 @@ async function getScopedLocalAccountData(userId, options = {}) {
   const nameOverridesRaw = readStoredJson(getScopedStorageKey(INSPO_NAMES_KEY, scope), {});
   const designMeta = readInspoLocalStateMeta(scope);
   let customPresets = [];
+  let fontCustomPresets = [];
   try {
-    customPresets = await _inspoIdbLoadAll(getInspoPresetOwnerKey(scope));
+    customPresets = await _inspoIdbLoadAll(getInspoPresetOwnerKey(scope), PRESET_BUCKET_INSPO);
+    fontCustomPresets = await _inspoIdbLoadAll(getInspoPresetOwnerKey(scope), PRESET_BUCKET_FONT);
   } catch (error) {
     console.warn('Failed to read scoped local account preset cache', error);
   }
@@ -11748,6 +12170,7 @@ async function getScopedLocalAccountData(userId, options = {}) {
     hiddenBuiltins: Array.isArray(hiddenBuiltinsRaw) ? hiddenBuiltinsRaw : [],
     nameOverrides: nameOverridesRaw && typeof nameOverridesRaw === 'object' ? nameOverridesRaw : {},
     customPresets: customPresets.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean),
+    fontCustomPresets: fontCustomPresets.map((preset) => normalizeCustomPresetForState(preset)).filter(Boolean),
     meta: designMeta,
   };
   const normalizedHistory = Array.isArray(historyItems) ? dedupeHistoryItems(historyItems) : [];
@@ -11762,7 +12185,7 @@ async function getScopedLocalAccountData(userId, options = {}) {
         ? Number(historyMeta.count)
         : normalizedHistory.length,
       presetCount: countScopedCustomEntries(titleStore) + countScopedCustomEntries(charStore),
-      customDesignPresetCount: designPresetState.customPresets.length,
+      customDesignPresetCount: designPresetState.customPresets.length + designPresetState.fontCustomPresets.length,
     },
   };
 }
@@ -11793,9 +12216,12 @@ async function clearSignedInAccountData() {
     _wizHiddenBuiltins = new Set();
     _wizPresetNameOverrides = {};
     _wizCustomPresets = [];
+    _wizFontCustomPresets = [];
     _wizSelectedPresets = new Set();
+    _wizSelectedFontPresets = new Set();
   });
   wizRenderInspoPresets();
+  wizRenderFontPresets();
   history = [];
   scheduleHistoryUIUpdate();
   if (_fhgState.open) renderFhgGallery();
@@ -11809,10 +12235,11 @@ function getAccountSummarySnapshot() {
   const { titleStore, charStore } = getTextPresetStoresSnapshot();
   const titleCustom = Object.values(titleStore || {}).reduce((sum, entry) => sum + (Array.isArray(entry && entry.custom) ? entry.custom.length : 0), 0);
   const charCustom = Object.values(charStore || {}).reduce((sum, entry) => sum + (Array.isArray(entry && entry.custom) ? entry.custom.length : 0), 0);
+  const designPresetCount = (Array.isArray(_wizCustomPresets) ? _wizCustomPresets.length : 0) + (Array.isArray(_wizFontCustomPresets) ? _wizFontCustomPresets.length : 0);
   return {
     historyCount: Array.isArray(history) ? history.length : 0,
     presetCount: titleCustom + charCustom,
-    customDesignPresetCount: Array.isArray(_wizCustomPresets) ? _wizCustomPresets.length : 0,
+    customDesignPresetCount: designPresetCount,
   };
 }
 
@@ -11870,6 +12297,7 @@ if (savedMode) {
 hookNewsLocaleUpdates();
 if (window.I18N) window.I18N.init();
 refreshModelNews(true);
+
 
 
 

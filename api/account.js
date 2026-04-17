@@ -14,14 +14,18 @@ function normalizeDesignPresetStateForResponse(state) {
     hiddenBuiltins: Array.isArray(nextState.hiddenBuiltins) ? nextState.hiddenBuiltins : [],
     nameOverrides: nextState.nameOverrides && typeof nextState.nameOverrides === 'object' ? nextState.nameOverrides : {},
     customPresets: Array.isArray(nextState.customPresets) ? nextState.customPresets : [],
+    fontCustomPresets: Array.isArray(nextState.fontCustomPresets) ? nextState.fontCustomPresets : [],
   };
 }
 
 function buildMigrationSummary(historyItems, titleStore, charStore, designPresetState) {
+  const customDesignPresetCount =
+    (Array.isArray(designPresetState && designPresetState.customPresets) ? designPresetState.customPresets.length : 0)
+    + (Array.isArray(designPresetState && designPresetState.fontCustomPresets) ? designPresetState.fontCustomPresets.length : 0);
   return {
     historyCount: Array.isArray(historyItems) ? historyItems.length : 0,
     presetCount: countCustomPresetEntries(titleStore) + countCustomPresetEntries(charStore),
-    customDesignPresetCount: Array.isArray(designPresetState && designPresetState.customPresets) ? designPresetState.customPresets.length : 0,
+    customDesignPresetCount,
   };
 }
 module.exports = async function handler(req, res) {

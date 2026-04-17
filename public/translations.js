@@ -4508,5 +4508,41 @@
   }
 })();
 
+(function applyCardStudioFontPresetTranslations() {
+  if (!window.TRANSLATIONS) return;
+  const english = {
+    wiz_font_preset_title: "Font Reference Presets",
+    wiz_font_preset_desc: "Upload typography references to guide lettering style, texture, spacing, and decorative font treatment.",
+    wiz_font_add_preset: "Add Font Preset",
+    wiz_font_modal_title: "Name your font preset",
+    wiz_font_modal_placeholder: "e.g. Luxury gold serif...",
+    wiz_font_modal_save: "Save Font Preset",
+  };
+  const russian = {
+    wiz_font_preset_title: "Пресеты шрифтовых референсов",
+    wiz_font_preset_desc: "Загрузите типографические референсы, чтобы направить стиль букв, текстуру, интервалы и декоративную обработку шрифта.",
+    wiz_font_add_preset: "Добавить шрифтовой пресет",
+    wiz_font_modal_title: "Назовите шрифтовой пресет",
+    wiz_font_modal_placeholder: "например, Золотой премиум-сериф...",
+    wiz_font_modal_save: "Сохранить шрифтовой пресет",
+  };
+  const localeValues = {
+    en: english,
+    es: english,
+    zh: english,
+    ar: english,
+    fr: english,
+    ru: { ...english, ...russian },
+    pt: english,
+    de: english,
+    ja: english,
+    ko: english,
+  };
+  for (const [locale, entries] of Object.entries(localeValues)) {
+    if (!window.TRANSLATIONS[locale]) continue;
+    Object.assign(window.TRANSLATIONS[locale], entries);
+  }
+})();
+
 
 

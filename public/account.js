@@ -778,6 +778,7 @@ function hasCachedAccountData(data) {
     || (Array.isArray(design.hiddenBuiltins) && design.hiddenBuiltins.length > 0)
     || (design.nameOverrides && typeof design.nameOverrides === 'object' && Object.keys(design.nameOverrides).length > 0)
     || (Array.isArray(design.customPresets) && design.customPresets.length > 0)
+    || (Array.isArray(design.fontCustomPresets) && design.fontCustomPresets.length > 0)
     || !!(design.meta && design.meta.dirty)
   );
 }
@@ -788,6 +789,7 @@ function hasDesignPresetStateContent(state) {
     (Array.isArray(nextState.hiddenBuiltins) && nextState.hiddenBuiltins.length > 0)
     || (nextState.nameOverrides && typeof nextState.nameOverrides === 'object' && Object.keys(nextState.nameOverrides).length > 0)
     || (Array.isArray(nextState.customPresets) && nextState.customPresets.length > 0)
+    || (Array.isArray(nextState.fontCustomPresets) && nextState.fontCustomPresets.length > 0)
   );
 }
 
@@ -797,6 +799,7 @@ function normalizeDesignPresetState(state) {
     hiddenBuiltins: Array.isArray(nextState.hiddenBuiltins) ? nextState.hiddenBuiltins.slice() : [],
     nameOverrides: nextState.nameOverrides && typeof nextState.nameOverrides === 'object' ? { ...nextState.nameOverrides } : {},
     customPresets: Array.isArray(nextState.customPresets) ? nextState.customPresets.slice() : [],
+    fontCustomPresets: Array.isArray(nextState.fontCustomPresets) ? nextState.fontCustomPresets.slice() : [],
   };
 }
 
@@ -820,22 +823,25 @@ function mergeDesignPresetState(localState, remoteState) {
   const remote = normalizeDesignPresetState(remoteState);
   const hiddenBuiltins = Array.from(new Set([...(remote.hiddenBuiltins || []), ...(local.hiddenBuiltins || [])]));
   const nameOverrides = { ...(remote.nameOverrides || {}), ...(local.nameOverrides || {}) };
-  const customPresetMap = new Map();
-
-  (remote.customPresets || []).forEach((preset) => {
-    if (!preset || !preset.id) return;
-    customPresetMap.set(String(preset.id), mergeDesignPresetCustomPreset(null, preset));
-  });
-  (local.customPresets || []).forEach((preset) => {
-    if (!preset || !preset.id) return;
-    const id = String(preset.id);
-    customPresetMap.set(id, mergeDesignPresetCustomPreset(preset, customPresetMap.get(id) || null));
-  });
+  const mergePresetList = (localList, remoteList) => {
+    const presetMap = new Map();
+    (remoteList || []).forEach((preset) => {
+      if (!preset || !preset.id) return;
+      presetMap.set(String(preset.id), mergeDesignPresetCustomPreset(null, preset));
+    });
+    (localList || []).forEach((preset) => {
+      if (!preset || !preset.id) return;
+      const id = String(preset.id);
+      presetMap.set(id, mergeDesignPresetCustomPreset(preset, presetMap.get(id) || null));
+    });
+    return Array.from(presetMap.values()).filter((preset) => preset && preset.id);
+  };
 
   return {
     hiddenBuiltins,
     nameOverrides,
-    customPresets: Array.from(customPresetMap.values()).filter((preset) => preset && preset.id),
+    customPresets: mergePresetList(local.customPresets, remote.customPresets),
+    fontCustomPresets: mergePresetList(local.fontCustomPresets, remote.fontCustomPresets),
   };
 }
 
@@ -846,7 +852,7 @@ function stableDesignPresetState(state) {
     acc[key] = next.nameOverrides[key];
     return acc;
   }, {});
-  const customPresets = (next.customPresets || [])
+  const normalizePresetList = (list) => (list || [])
     .filter((preset) => preset && preset.id)
     .map((preset) => ({
       id: String(preset.id),
@@ -857,7 +863,12 @@ function stableDesignPresetState(state) {
       createdAt: preset.createdAt || null,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
-  return { hiddenBuiltins, nameOverrides, customPresets };
+  return {
+    hiddenBuiltins,
+    nameOverrides,
+    customPresets: normalizePresetList(next.customPresets),
+    fontCustomPresets: normalizePresetList(next.fontCustomPresets),
+  };
 }
 
 function designPresetStatesEqual(left, right) {
@@ -1112,7 +1123,8 @@ function hasLegacyPayload(payload) {
   const hasDesignMeta = Array.isArray(design.hiddenBuiltins) && design.hiddenBuiltins.length > 0;
   const hasNames = design.nameOverrides && Object.keys(design.nameOverrides).length > 0;
   const hasCustom = Array.isArray(design.customPresets) && design.customPresets.length > 0;
-  return hasHistory || hasTitle || hasChar || hasDesignMeta || hasNames || hasCustom;
+  const hasFontCustom = Array.isArray(design.fontCustomPresets) && design.fontCustomPresets.length > 0;
+  return hasHistory || hasTitle || hasChar || hasDesignMeta || hasNames || hasCustom || hasFontCustom;
 }
 
 async function refreshLegacyPayload() {
@@ -1331,6 +1343,22 @@ async function syncDesignPresetsNow() {
     hiddenBuiltins: Array.isArray(rawDesignPresetState && rawDesignPresetState.hiddenBuiltins) ? rawDesignPresetState.hiddenBuiltins : [],
     nameOverrides: rawDesignPresetState && typeof rawDesignPresetState.nameOverrides === 'object' ? rawDesignPresetState.nameOverrides : {},
     customPresets: (Array.isArray(rawDesignPresetState && rawDesignPresetState.customPresets) ? rawDesignPresetState.customPresets : [])
+      .map((preset) => {
+        if (!preset || typeof preset !== 'object') return null;
+        const safeSrc = (typeof preset.src === 'string' && preset.src && !/^data:/i.test(preset.src)) ? preset.src : null;
+        const safeDataUrl = (typeof preset.dataUrl === 'string' && preset.dataUrl && preset.dataUrl.length <= 180000) ? preset.dataUrl : null;
+        if (!preset.storagePath && !safeSrc && !safeDataUrl) {
+          skippedCustomPresetCount += 1;
+          return null;
+        }
+        return {
+          ...preset,
+          src: safeSrc,
+          dataUrl: safeDataUrl,
+        };
+      })
+      .filter(Boolean),
+    fontCustomPresets: (Array.isArray(rawDesignPresetState && rawDesignPresetState.fontCustomPresets) ? rawDesignPresetState.fontCustomPresets : [])
       .map((preset) => {
         if (!preset || typeof preset !== 'object') return null;
         const safeSrc = (typeof preset.src === 'string' && preset.src && !/^data:/i.test(preset.src)) ? preset.src : null;
