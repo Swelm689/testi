@@ -1068,15 +1068,15 @@
                                         <div class="field" id="toolsFieldWebSearch">
                                             <label data-i18n="wiz_lbl_web_search">Web Search</label>
                                             <select id="toolsWebSearch">
-                                                <option value="true" selected>On</option>
-                                                <option value="false">Off</option>
+                                                <option value="true">On</option>
+                                                <option value="false" selected>Off</option>
                                             </select>
                                         </div>
                                         <div class="field" id="toolsFieldGoogleSearch">
                                             <label data-i18n="wiz_lbl_google_search">Google Search</label>
                                             <select id="toolsGoogleSearch">
-                                                <option value="true" selected>On</option>
-                                                <option value="false">Off</option>
+                                                <option value="true">On</option>
+                                                <option value="false" selected>Off</option>
                                             </select>
                                         </div>
                                         <div class="field" id="toolsFieldSeed" style="display:none;">
@@ -1602,7 +1602,10 @@
                         <button type="button" class="history-filter-chip" data-history-filter="3d" data-i18n="history_filter_3d" aria-pressed="false">3D</button>
                     </div>
                 </div>
-                <div id="historyResultsMeta" class="history-results-meta"></div>
+                <div class="history-toolbar-meta">
+                    <div id="historyResultsMeta" class="history-results-meta"></div>
+                    <button id="historyClearAllBtn" class="history-clear-all-btn" type="button" onclick="clearAllHistory(event)" data-i18n="history_clear_all" data-i18n-title="history_clear_all_title" title="Clear all history">Clear all</button>
+                </div>
             </div>
             <div class="history-scroll-region">
                 <div id="historyList" class="history-list"></div>
@@ -1653,7 +1656,10 @@
                             <button type="button" class="fhg-filter" data-fhg-filter="3d" data-i18n="history_filter_3d">3D</button>
                         </div>
                     </div>
-                    <div class="fhg-meta" id="fhgMeta"></div>
+                    <div class="fhg-toolbar-meta">
+                        <div class="fhg-meta" id="fhgMeta"></div>
+                        <button id="fhgClearAllBtn" class="fhg-clear-btn" type="button" onclick="clearAllHistory(event)" data-i18n="history_clear_all" data-i18n-title="history_clear_all_title" title="Clear all history">Clear all</button>
+                    </div>
                 </header>
                 <div class="fhg-scroll" id="fhgScroll">
                     <div class="fhg-grid" id="fhgGrid"></div>

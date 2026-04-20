@@ -1433,13 +1433,38 @@ async function queueHistoryDelete(item) {
       method: 'POST',
       body: { action: 'delete-history', id: item.id },
     });
-    state.summary = mergeSummaryCounts(state.summary, window.NanoApp.getAccountSummarySnapshot());
+    const liveSummary = window.NanoApp && typeof window.NanoApp.getAccountSummarySnapshot === 'function'
+      ? window.NanoApp.getAccountSummarySnapshot()
+      : null;
+    state.summary = liveSummary
+      ? { ...(state.summary || {}), ...liveSummary }
+      : { ...(state.summary || {}), historyCount: Math.max(0, Number(state.summary && state.summary.historyCount) - 1) };
     updateProfileView();
   } catch (error) {
     console.error('history delete failed', error);
   } finally {
     syncState.historyDeleting.delete(item.id);
   }
+}
+
+async function clearHistory() {
+  if (!state.bootstrapComplete || !state.user) return false;
+  if (syncState.historyTimer) {
+    clearTimeout(syncState.historyTimer);
+    syncState.historyTimer = null;
+  }
+  syncState.historyQueue.forEach((item) => {
+    if (item) delete item.__accountPersistQueued;
+  });
+  syncState.historyQueue = [];
+  syncState.historyDeleting.clear();
+  await requestJson(ACCOUNT_ENDPOINT, {
+    method: 'POST',
+    body: { action: 'clear-history' },
+  });
+  state.summary = { ...(state.summary || {}), historyCount: 0 };
+  updateProfileView();
+  return true;
 }
 
 function queueTextPresetSync() {
@@ -1608,6 +1633,7 @@ window.NanoAccountBridge = {
   queueDesignPresetSync,
   queueHistoryPersist,
   queueHistoryDelete,
+  clearHistory,
 };
 
 async function init() {

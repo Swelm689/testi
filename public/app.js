@@ -82,6 +82,47 @@ function getHistoryPrimaryUrl(item) {
   );
 }
 
+function isHistoryImagePreviewSource(url) {
+  const value = String(url || '').trim();
+  if (!value) return false;
+  if (/^data:image\//i.test(value)) return true;
+  if (/^blob:/i.test(value)) return true;
+  return /\.(avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)(?:[\?#].*)?$/i.test(value);
+}
+
+function isHistoryOriginalEquivalentUrl(item, candidate) {
+  const value = String(candidate || '').trim();
+  if (!value || !item || typeof item !== 'object') return false;
+  const meta = item.meta && typeof item.meta === 'object' ? item.meta : null;
+  const originals = [
+    item.url,
+    item.modelDownloadUrl,
+    meta && meta.originalUrl,
+    meta && meta.originalDownloadUrl,
+  ].map((entry) => String(entry || '').trim()).filter(Boolean);
+  return originals.includes(value);
+}
+
+function hasUsableHistoryPreview(item, candidate = item && item.thumbnailUrl) {
+  const preview = String(candidate || '').trim();
+  if (!preview || !item || typeof item !== 'object') return false;
+  if (item.type === 'audio') return true;
+  if (item.type === 'video') return isHistoryImagePreviewSource(preview);
+  if (item.type === '3d') return isHistoryImagePreviewSource(preview) || !isHistoryOriginalEquivalentUrl(item, preview);
+  if (item.type === 'image') {
+    if (isHistoryOriginalEquivalentUrl(item, preview) && !/^data:image\//i.test(preview)) return false;
+    return true;
+  }
+  return true;
+}
+
+function pickHistoryPreviewCandidate(item, candidates = []) {
+  for (const candidate of candidates) {
+    if (hasUsableHistoryPreview(item, candidate)) return String(candidate).trim();
+  }
+  return '';
+}
+
 function getHistorySemanticKey(item) {
   if (!item || typeof item !== 'object') return '';
   const meta = item.meta && typeof item.meta === 'object' ? item.meta : null;
@@ -112,6 +153,7 @@ function getHistoryIdentityKey(item, fallbackIndex = 0) {
 }
 
 const LOCAL_HISTORY_CACHE_LIMIT = 120;
+const LOCAL_HISTORY_INLINE_THUMB_MAX_LENGTH = 18000;
 
 function normalizeHistoryItemForRuntime(item) {
   if (!item || typeof item !== 'object') return item;
@@ -127,6 +169,9 @@ function normalizeHistoryItemForRuntime(item) {
   ensureHistoryItemIdentity(next);
 
   if (type === 'video') {
+    if (next.thumbnailUrl && !hasUsableHistoryPreview(next, next.thumbnailUrl)) {
+      next.thumbnailUrl = null;
+    }
     if ((!next.url || /^data:image\//i.test(String(next.url))) && (originalUrl || originalDownloadUrl)) {
       next.url = originalUrl || originalDownloadUrl;
     }
@@ -148,6 +193,9 @@ function normalizeHistoryItemForRuntime(item) {
       next.thumbnailUrl = fallbackThumb || previewUrl || createAudioPlaceholderDataUrl('AUDIO');
     }
   } else if (type === 'image') {
+    if (next.thumbnailUrl && !hasUsableHistoryPreview(next, next.thumbnailUrl)) {
+      next.thumbnailUrl = null;
+    }
     if (originalUrl && (!next.url || (fallbackThumb && String(next.url) === fallbackThumb))) {
       next.url = originalUrl;
     }
@@ -249,13 +297,15 @@ function isPrimaryCoarsePointer() {
 }
 
 function shouldSkipClientHistoryThumbnailWork() {
-  return document.hidden || isPrimaryCoarsePointer() || !!activeTouchAssetDrag;
+  return document.hidden || !!activeTouchAssetDrag;
 }
 
 function canGenerateClientHistoryThumbnail(item) {
-  if (!item || !item.url || item.thumbnailUrl || item.type === '3d') return false;
+  if (!item || !item.url || item.type === '3d' || item.type === 'audio') return false;
   if (shouldSkipClientHistoryThumbnailWork()) return false;
-  return item.type === 'video';
+  if (hasUsableHistoryPreview(item)) return false;
+  if (item.type === 'image' && /^data:image\//i.test(String(item.url))) return false;
+  return item.type === 'video' || item.type === 'image';
 }
 
 // Account history/tasks are loaded after the signed-in scope is known.
@@ -1237,6 +1287,7 @@ function setupDropZone(zoneEl, inputEl) {
   if (zoneEl._dropZoneBoundFor === inputEl.id) return;
   zoneEl._dropZoneBoundFor = inputEl.id;
   zoneEl._dropInput = inputEl;
+  zoneEl.addEventListener('pointerdown', () => rememberPreferredImagePasteTarget(inputEl), true);
 
   const markActive = (e) => {
     if (!canHandleDropTransfer(e.dataTransfer)) return false;
@@ -1297,6 +1348,162 @@ document.addEventListener('drop', (e) => {
   }
   document.body.classList.remove('dragging-internal-asset');
 });
+
+let preferredImagePasteInputId = '';
+
+function rememberPreferredImagePasteTarget(inputEl) {
+  if (!inputEl || !inputEl.id) return;
+  const accept = String(inputEl.accept || '').toLowerCase();
+  if (!accept.includes('image/')) return;
+  preferredImagePasteInputId = inputEl.id;
+}
+
+function isElementEffectivelyVisible(el) {
+  let node = el;
+  while (node && node.nodeType === 1) {
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    node = node.parentElement;
+  }
+  return !!el && document.body.contains(el);
+}
+
+function resolveVisibleUploadSurface(inputEl) {
+  const surface = getUploadSurfaceForInput(inputEl);
+  return surface && isElementEffectivelyVisible(surface) ? surface : null;
+}
+
+function canPasteIntoImageInputId(inputId) {
+  if (!inputId) return false;
+  const inputEl = qs(inputId);
+  if (!inputEl) return false;
+  const accept = String(inputEl.accept || '').toLowerCase();
+  if (!accept.includes('image/')) return false;
+  return !!resolveVisibleUploadSurface(inputEl);
+}
+
+function resolveVideoPasteImageInputId() {
+  const selectedModel = getSelectedVideoModel();
+  const selectedModelId = selectedModel && selectedModel.id ? String(selectedModel.id) : (qs('videoModel') ? String(qs('videoModel').value || '') : '');
+
+  if (selectedModelId && isSeedance2VideoModelId(selectedModelId)) {
+    const family = getSeedance2FamilyForModelId(selectedModelId);
+    if (family === 'reference-to-video' && canPasteIntoImageInputId('seedance2ReferenceImagesInput')) return 'seedance2ReferenceImagesInput';
+    if (family === 'image-to-video' && canPasteIntoImageInputId('videoImageInput')) return 'videoImageInput';
+  }
+
+  if (selectedModelId && isKling3VideoModelId(selectedModelId)) {
+    if (currentKling3Tab === 'motion-control' && canPasteIntoImageInputId('kling3RefImagesInput')) return 'kling3RefImagesInput';
+    if (canPasteIntoImageInputId('kling3StartImageInput')) return 'kling3StartImageInput';
+    if (canPasteIntoImageInputId('kling3EndImageInput')) return 'kling3EndImageInput';
+  }
+
+  const orderedFallbacks = currentVideoTab === 'reference-to-video'
+    ? ['referenceImagesInput', 'videoImageInput', 'videoEndImageInput']
+    : ['videoImageInput', 'referenceImagesInput', 'videoEndImageInput'];
+  return orderedFallbacks.find((inputId) => canPasteIntoImageInputId(inputId)) || '';
+}
+
+function resolveThreeDPasteImageInputId() {
+  return [
+    'threeDFrontInput',
+    'threeDMeshyTextureImageInput',
+    'threeDRetextureStyleImageInput',
+    'threeDBackInput',
+    'threeDLeftInput',
+    'threeDRightInput',
+  ].find((inputId) => canPasteIntoImageInputId(inputId)) || '';
+}
+
+function resolveCurrentImagePasteInput() {
+  if (preferredImagePasteInputId && canPasteIntoImageInputId(preferredImagePasteInputId)) {
+    return qs(preferredImagePasteInputId);
+  }
+
+  let fallbackInputId = '';
+  if (currentMode === 'tools') {
+    if (currentToolsTool === 'card-studio') fallbackInputId = canPasteIntoImageInputId('toolsImageInput') ? 'toolsImageInput' : '';
+    else if (currentToolsTool === 'enhancer' || currentToolsTool === 'background-removal') fallbackInputId = canPasteIntoImageInputId('toolsUtilityImageInput') ? 'toolsUtilityImageInput' : '';
+  } else if (currentMode === 'image') {
+    fallbackInputId = canPasteIntoImageInputId('imageInput') ? 'imageInput' : '';
+  } else if (currentMode === 'video') {
+    fallbackInputId = resolveVideoPasteImageInputId();
+  } else if (currentMode === '3d') {
+    fallbackInputId = resolveThreeDPasteImageInputId();
+  }
+
+  return fallbackInputId ? qs(fallbackInputId) : null;
+}
+
+function appendPastedImagesToCollectionInput(inputEl, files) {
+  const safeFiles = Array.from(files || []).filter(Boolean);
+  if (!inputEl || !safeFiles.length) return false;
+
+  if (inputEl.id === 'imageInput') {
+    const max = editMaxImages();
+    uploadedImageFiles = [...uploadedImageFiles, ...safeFiles].slice(0, max);
+    updateImagePreview();
+    if (uploadedImageFiles.length >= max) {
+      showToast((window.I18N ? I18N.t('wiz_max_images') : 'Maximum {n} images allowed').replace('{n}', max));
+    }
+    return true;
+  }
+
+  if (inputEl.id === 'toolsImageInput') {
+    const max = wizMaxImages();
+    uploadedToolsImages = [...uploadedToolsImages, ...safeFiles].slice(0, max);
+    updateToolsImagePreview();
+    saveAppState();
+    if (uploadedToolsImages.length >= max) {
+      showToast((window.I18N ? I18N.t('wiz_max_images') : 'Maximum {n} images').replace('{n}', max));
+    }
+    return true;
+  }
+
+  return false;
+}
+
+function isTextEntryElement(el) {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable) return true;
+  const tag = String(el.tagName || '').toLowerCase();
+  if (tag === 'textarea') return true;
+  if (tag !== 'input') return false;
+  const type = String(el.getAttribute('type') || 'text').toLowerCase();
+  return type !== 'file';
+}
+
+function handleGlobalImagePaste(event) {
+  const clipboard = event.clipboardData;
+  if (!clipboard) return;
+  const imageFiles = Array.from(clipboard.items || [])
+    .map((item) => (item && item.kind === 'file' ? item.getAsFile() : null))
+    .filter((file) => file && /^image\//i.test(String(file.type || '')));
+  if (!imageFiles.length) return;
+
+  if (isTextEntryElement(document.activeElement)) return;
+
+  const targetInput = resolveCurrentImagePasteInput();
+  if (!targetInput) {
+    showToast(i18nText('toast_image_paste_no_target', 'Open an image upload area first.'), 'error');
+    return;
+  }
+
+  event.preventDefault();
+  rememberPreferredImagePasteTarget(targetInput);
+  const handledByCollection = appendPastedImagesToCollectionInput(targetInput, imageFiles);
+  if (!handledByCollection) {
+    const shouldAppend = !!((targetInput._uploadConfig && targetInput._uploadConfig.multiple) || targetInput.multiple);
+    assignFilesToInput(targetInput, shouldAppend ? imageFiles : [imageFiles[0]], { append: shouldAppend, reason: 'paste' });
+  }
+  showToast(i18nText('toast_image_pasted', 'Image pasted'));
+}
+
+function initGlobalImagePaste() {
+  if (window.__nanoImagePasteInitialized) return;
+  window.__nanoImagePasteInitialized = true;
+  document.addEventListener('paste', handleGlobalImagePaste, true);
+}
 
 // Force-download a cross-origin URL by fetching as blob
 async function forceDownload(url, filename) {
@@ -1850,11 +2057,7 @@ function refreshAllManagedUploads() {
 function createInternalAssetPayload(item) {
   if (!item || (item.type !== 'image' && item.type !== 'video' && item.type !== 'audio')) return null;
   const meta = item && item.meta && typeof item.meta === 'object' ? item.meta : null;
-  const resolvedUrl = item.type === 'video'
-    ? (meta && (meta.originalDownloadUrl || meta.originalUrl)) || item.modelDownloadUrl || item.url || ''
-    : item.type === 'audio'
-      ? (meta && (meta.originalUrl || meta.originalDownloadUrl)) || item.url || ''
-      : (meta && (meta.originalUrl || meta.originalDownloadUrl)) || item.url || item.thumbnailUrl || '';
+  const resolvedUrl = getHistoryPrimaryUrl(item);
   if (!resolvedUrl) return null;
   const fallbackExt = item.type === 'video' ? 'mp4' : item.type === 'audio' ? (meta && meta.outputFormat ? String(meta.outputFormat).toLowerCase() : 'wav') : 'png';
   const filename = deriveFilenameFromUrl(resolvedUrl, fallbackExt);
@@ -7532,6 +7735,7 @@ function assembleWbCardPrompt(productImageCount) {
     const label = count === 1 ? singularLabel : pluralLabel;
     return `${range} - ${label}: ${tail}`;
   };
+  const quoteExact = (value) => JSON.stringify(String(value == null ? '' : value));
   const title = (qs('toolsTitleInput') ? qs('toolsTitleInput').value.trim() : '') || 'Premium Quality';
   const charItems = document.querySelectorAll('.tools-char-item');
   const chars = [];
@@ -7541,9 +7745,10 @@ function assembleWbCardPrompt(productImageCount) {
   });
   const fontStyle = (qs('toolsFontInput') ? qs('toolsFontInput').value.trim() : '') || 'Bold minimalist sans-serif';
   const wishes = (qs('toolsWishesInput') ? qs('toolsWishesInput').value.trim() : '') || '';
-  const charsBlock = chars.length > 0
-    ? chars.map(c => `  • ${c}`).join('\n')
-    : '  • Natural materials\n  • Premium quality\n  • Guaranteed';
+  const featureLines = chars.length > 0 ? chars : ['Natural materials', 'Premium quality', 'Guaranteed'];
+  const charsBlock = featureLines.map(c => `  • ${c}`).join('\n');
+  const exactTitle = quoteExact(title);
+  const exactFeatureBlock = featureLines.map((c, index) => `${index + 1}. ${quoteExact(c)}`).join('\n');
   const textOverlays = skGetTextOverlaysForPrompt();
   const inspoPresetCount = getInspoPresetSources().length;
   const inspoUploadCount = uploadedInspoImages.length;
@@ -7563,25 +7768,25 @@ Ensure the background, scene styling, color palette, props, and decorative detai
   const fontRefStart = prodCount + 1;
   const designRefStart = prodCount + fontPresetCount + 1;
   const designReferenceAuthorityLine = hasFontPresetRefs
-    ? 'Copy the NON-TYPOGRAPHIC visual language from the design reference(s): background, scene, color palette, composition, layout, spacing, element positioning, icon style, frames, shadows, overlays, and decorative details outside the lettering itself. Use the design reference(s) for where text sits in the layout, not for how the headline letters should look.'
-    : 'Copy the full visual language from the design reference(s): background, scene, color palette, composition, layout, spacing, element positioning, typography treatment, icon style, text decoration, shadows, overlays, and decorative details. Reproduce the aesthetic faithfully.';
+    ? 'Transfer the NON-TYPOGRAPHIC design language from the design reference(s): scene, palette, composition, crop, negative space, panels, badges, frames, supporting text placement, icon language, transparency boxes, borders, shadows, overlays, and decorative motifs. Use them for where text sits and how the card is structured, but do not let them override the headline treatment defined by the typography reference(s).'
+    : 'Transfer the full visual language from the design reference(s): scene, palette, composition, crop, negative space, panels, badges, frames, typography treatment, icon language, transparency boxes, borders, shadows, overlays, and decorative motifs. Recreate the same design family with high fidelity.';
   const fontReferenceRolesBlock = hasFontPresetRefs
     ? `\n`
       + (fontPresetCount === 1
-          ? `Image ${fontRefStart} - FONT STYLE GUIDE: This image is authority ONLY for headline typography styling.\n`
-          : `Images ${fontRefStart}-${fontRefStart + fontPresetCount - 1} - FONT STYLE GUIDES: These images are authority ONLY for headline typography styling.\n`)
-      + `Study the font reference(s) as typography style guides. Transfer the lettering system only: serif/sans construction, weight, width, stroke contrast, condensed/expanded feel, terminal shape, round vs sharp corners, slant, uppercase/lowercase treatment, tracking, decorative inline details, bevel, foil, embossing, glow, shadow, texture, and overall display mood.\nMatch the style family and finish, not the literal words from the reference. If multiple font references are present, follow the clearest shared direction instead of mixing unrelated styles.\nUse the font reference(s) ONLY for typography. Do NOT copy their background, layout, product placement, or scene composition.`
+          ? `Image ${fontRefStart} - TYPOGRAPHY REFERENCE: This image is authority for the MAIN HEADLINE treatment.\n`
+          : `Images ${fontRefStart}-${fontRefStart + fontPresetCount - 1} - TYPOGRAPHY REFERENCES: These images are authority for the MAIN HEADLINE treatment.\n`)
+      + `Study the typography reference(s) as headline treatment guides. Match with high fidelity: letterform family, proportions, weight, width, stroke contrast, case handling, spacing, curvature, slant, distortion, perspective, rotation, color, gradients, metallic/foil/glass feel, transparency/opacity, texture, outline, bevel, emboss, glow, shadow, and the overall silhouette and energy of the headline block.\nTransfer the style system, not the literal words shown inside the reference image(s). If multiple typography references conflict, follow the clearest shared direction or the strongest single reference instead of averaging unrelated styles.\nUse the typography reference(s) ONLY for the headline treatment and its text effects. Do NOT copy their background scene, product arrangement, or unrelated objects.`
     : '';
   const fontDirectionBlock = hasFontPresetRefs
-    ? 'Use the uploaded font reference image(s) as the strongest authority for headline typography treatment. Keep the exact text content the user provided, but style that text to match the lettering language in the reference image(s). Apply the strongest styling to the main headline; keep feature text simpler, harmonized, and highly readable.'
-    : `HEADING TYPOGRAPHY STYLE GUIDE: ${fontStyle}\nApply this style to the headline. Keep body feature text clean and readable.`;
+    ? 'Use the uploaded typography reference image(s) as the strongest authority for the headline block. Match not only the font family, but also the headline color treatment, gradients, transparency, texture, outline, glow, shadow, depth, curvature, and graphic presence. Keep the exact user-provided headline words. Supporting bullet text should harmonize with that system, but stay simpler and highly readable.'
+    : `HEADING TYPOGRAPHY STYLE GUIDE: ${fontStyle}\nUse this as the direction for the headline treatment. Also decide tasteful headline color, texture, transparency, and supporting text styling that fit the overall card.`;
   const referencePriorityBlock = (() => {
     const lines = ['═══ REFERENCE PRIORITY (follow strictly) ═══'];
     if (prodCount > 0) {
       lines.push(`1. ${formatOrderedRole(1, prodCount, 'PRODUCT PHOTO', 'PRODUCT PHOTOS', 'Use these as the source of truth for the product. Preserve exact shape, color, material, texture, proportions, and real-world scale.')}`);
     }
     if (hasFontPresetRefs) {
-      lines.push(`${lines.length}. ${formatOrderedRole(fontRefStart, fontPresetCount, 'FONT STYLE GUIDE', 'FONT STYLE GUIDES', 'Use these as the source of truth for headline lettering style and text effects only.')}`);
+      lines.push(`${lines.length}. ${formatOrderedRole(fontRefStart, fontPresetCount, 'TYPOGRAPHY REFERENCE', 'TYPOGRAPHY REFERENCES', 'Use these as the source of truth for headline lettering style and text effects only.')}`);
     }
     if (hasInspo) {
       lines.push(`${lines.length}. ${formatOrderedRole(designRefStart, totalInspoCount, 'DESIGN REFERENCE', 'DESIGN REFERENCES', 'Use these as the source of truth for composition, layout, palette, background, decorative framing, and non-typographic visual language.')}`);
@@ -7594,6 +7799,45 @@ Ensure the background, scene styling, color palette, props, and decorative detai
     }
     return lines.join('\n');
   })();
+
+  const quotedTextRulesBlock = `═══ TEXT TO RENDER (quoted text is immutable) ═══
+Headline — render exactly once:
+${exactTitle}
+
+Feature bullets — render each exactly once, each with one matching icon:
+${exactFeatureBlock}
+
+Never paraphrase, translate, reorder, merge, or duplicate the quoted text. If a feature needs multiple lines, keep the wording character-for-character identical.`;
+
+  const creativeSynthesisBlock = hasInspo
+    ? `═══ CREATIVE SYNTHESIS ═══
+Create one fresh, premium Wildberries hero card in the SAME design family as the reference image(s), not a literal pixel copy and not a collage. Preserve the reference hierarchy, layout logic, and styling cues, but adapt them intelligently to this exact product and this exact text.
+
+If the design reference(s) show translucent text panels, frosted boxes, sticker shapes, glow bars, borders, frames, layered shadows, or angled text blocks, adapt those treatments where they strengthen readability and visual impact.`
+    : `═══ CREATIVE SYNTHESIS ═══
+Design an original premium Wildberries hero card with strong hierarchy, believable lifestyle staging, polished text panels, and tasteful decorative framing where needed. The result should feel art-directed, not templated.`;
+
+  const productPreservationBlock = `═══ PRODUCT PRESERVATION (critical — zero deviation) ═══
+• Preserve the product’s exact shape, color, material, proportions, texture, and scale from the product photo(s).
+• Do NOT add text, logos, labels, patterns, or extra details directly on the product itself.
+• Keep the product physically grounded with believable perspective, contact shadows, and real-world scale.
+• If any reference conflicts with the product photo(s), preserve the product photo(s).`;
+
+  const typographyTransferBlock = `═══ TYPOGRAPHY & TEXT-STYLING TRANSFER ═══
+${fontDirectionBlock}
+${hasInspo
+    ? 'Use the design reference(s) for text placement, layout hierarchy, supporting panels, margin rhythm, and icon positioning.'
+    : 'Create an elegant, high-contrast text layout with a clear headline zone and supporting feature bullets that feel premium and easy to scan.'}
+If typography reference(s) are present, they control how the main headline looks: letterforms, styling, transparency, colors, gradients, texture, effects, and graphic attitude. ${hasInspo ? 'The design reference(s) control where the text group sits in the composition and how the surrounding card is structured.' : 'Build the surrounding card structure to support that headline treatment.'}
+Keep the headline visually dominant. Supporting feature text should harmonize with the headline system, but remain cleaner and more legible.`;
+
+  const qualityBlock = `═══ FORBIDDEN ═══
+✗ Prices, discount tags, promo stickers, star ratings, barcodes
+✗ Wildberries or WB logos, watermarks, or any unrelated branding
+✗ Duplicate text, duplicated icons, or copied words from the typography reference image(s)
+
+═══ QUALITY BAR ═══
+Premium e-commerce art direction · strong visual hierarchy · high readability · cinematic but commercially clean lighting · coherent palette · polished composition · 4K-ready detail · no sloppy collage look`;
 
   if (hasInspo) {
     let imageRolesBlock = `═══ IMAGE ROLES (follow strictly) ═══\n`;
@@ -7608,37 +7852,30 @@ Ensure the background, scene styling, color palette, props, and decorative detai
       : `Images ${designRefStart}-${designRefStart + totalInspoCount - 1} - DESIGN REFERENCES: These images are the authority for the overall card art direction.`)
       + `\n${designReferenceAuthorityLine}\nDo NOT take products or literal objects from the design reference(s) - only transfer the intended visual language.`;
 
-    return `Generate a premium e-commerce hero card for the Wildberries marketplace.
+    return `Create one premium Wildberries marketplace product card from the uploaded references.
+
+Goal: make an original, conversion-focused hero card that feels creatively art-directed from the references while keeping the product exact and the user text exact.
 
 ═══ CANVAS ═══
-Format: portrait 3:4 ratio. Quality: ultra-sharp, 4K resolution, award-winning composition, masterpiece.
+Portrait 3:4. Premium commercial product-card aesthetic. Ultra-sharp, 4K-ready, polished, high-end, coherent.
 
 ${referencePriorityBlock}
 
-═══ PRODUCT RULES (critical — zero deviation) ═══
-• Do NOT alter the product’s shape, color, proportions, material, or texture in any way.
-• Do NOT add text, logos, or extra details directly ON or TO the product itself.
-• Product occupies 30–55% of the image area — realistic physical scale.
-• Product is physically grounded: accurate contact shadows, stable base, believable perspective.
-
 ${imageRolesBlock}
 
-═══ TEXT CONTENT (reproduce exactly — validate spelling character by character) ═══
-HEADLINE: "${title}"
-FEATURE LIST — each item paired with one unique icon:
-${charsBlock}
+${creativeSynthesisBlock}
 
-Place the headline, feature bullets, and icons exactly as the design reference(s) position such elements. Use the design reference(s) for size relationships, placement, spacing, panel treatment, and contrast strategy so all text is legible. Use the font reference(s), when present, for how the headline letters themselves should look.
-${fontDirectionBlock}
-CRITICAL: Every text element must appear EXACTLY ONCE - never duplicate lines or icons.
-CRITICAL: Transfer font STYLE from the font reference(s), not the literal words shown inside those reference images.
+${productPreservationBlock}
 
-═══ STRICTLY FORBIDDEN ═══
-✗ Prices, discount tags, promo stickers, star ratings, barcodes
-✗ Logos, watermarks, Wildberries or WB brand marks anywhere
+${quotedTextRulesBlock}
 
-═══ QUALITY ═══
-ultra-sharp · 4K detail · cinematic lighting · premium composition · masterpiece${bgStyleHarmonyBlock}${wishes ? `\n\n═══ ADDITIONAL WISHES ═══\n${wishes}` : ''}${textOverlays ? `\n\n═══ ADDITIONAL TEXT TO RENDER (reproduce exactly as written) ═══\n${textOverlays}` : ''}`;
+${typographyTransferBlock}
+
+═══ LAYOUT & READABILITY ═══
+Keep the headline, feature bullets, icons, and supporting panels in the same hierarchy and placement logic as the design reference(s). Match spacing, alignment, panel treatment, transparency strategy, and contrast style so the text is both beautiful and instantly readable.
+The headline is the visual hero among all text. The feature bullets must support it without competing with it.
+
+${qualityBlock}${bgStyleHarmonyBlock}${wishes ? `\n\n═══ USER WISHES ═══\n${wishes}` : ''}${textOverlays ? `\n\n═══ EXTRA TEXT TO RENDER (quoted content remains exact) ═══\n${textOverlays}` : ''}`;
   }
 
   const sceneBlock = `═══ SCENE ═══
@@ -7654,20 +7891,17 @@ Scene type — apply whichever matches the product:
 → Electronics / gadgets → active-use scenario (desk / hands / home), no third-party logos
 → Home décor / furniture / textiles → interior scene where scale reads naturally`;
 
-  const textBlock = `═══ TEXT ON CARD (spelling must be perfect — validate character by character) ═══
-HEADLINE — positioned at the TOP CENTER, bold, large, single line. Text reading exactly:
-"${title}"
+  const textBlock = `${quotedTextRulesBlock}
 
-FEATURE BULLETS — placed on LEFT and RIGHT sides of the card, each with a small icon. Feature list:
-${charsBlock}
-
-CRITICAL: Every text element must appear EXACTLY ONCE — never duplicate lines, numbers, or icons.
-CRITICAL: All text must be maximum legible — strong contrast between text and background at all times. Use white or accent-colored text on dark semi-transparent overlay panels where needed.`;
+═══ TEXT PLACEMENT ═══
+HEADLINE — positioned at the TOP CENTER or the strongest premium headline zone in the composition.
+FEATURE BULLETS — placed on LEFT and RIGHT sides or in balanced supporting positions around the product, each with a small matching icon.
+All text must remain immediately legible with strong contrast and clean support panels where needed.`;
 
   const iconAndTypoBlock = `═══ ICON & TYPOGRAPHY STYLE ═══
-Icons: Each feature bullet should have ONE small icon that matches its text. All icons must follow a unified stylistic approach. Be very creative with icon design.
+Icons: each feature bullet should have ONE matching icon. All icons must belong to one coherent visual family and feel intentionally designed for this card.
 
-${fontDirectionBlock}`;
+${typographyTransferBlock}`;
 
   let imageRolesBlock = '';
   if (prodCount > 0 || hasFontPresetRefs) {
@@ -7679,18 +7913,16 @@ ${fontDirectionBlock}`;
     if (hasFontPresetRefs) imageRolesBlock += fontReferenceRolesBlock;
   }
 
-  return `Generate a premium e-commerce hero card for the Wildberries marketplace. This is a structured reasoning task — follow every requirement explicitly and precisely.
+  return `Create one premium Wildberries marketplace product card. This is a structured edit-and-design task: preserve the product exactly, render the text exactly, and build a fresh premium card around it.
 
 ═══ CANVAS ═══
 Format: portrait 3:4 ratio. Style: photorealistic commercial product photography. Quality: ultra-sharp, 4K resolution, award-winning composition, cinematic lighting, masterpiece.
 
 ${referencePriorityBlock}
 
-═══ PRODUCT RULES (critical — zero deviation) ═══
-• The reference product photo is the source of truth. Do NOT alter the product’s shape, color, proportions, material, or texture in any way.
-• Do NOT add text, logos, branding, or extra details directly ON or TO the product itself.
-• Product occupies 30–55% of the image area — realistic physical scale, never oversized or miniaturized.
-• Product is physically grounded: accurate contact shadows, stable base point, believable perspective with surroundings.
+${creativeSynthesisBlock}
+
+${productPreservationBlock}
 
 ${sceneBlock}
 
@@ -7698,12 +7930,7 @@ ${textBlock}
 
 ${iconAndTypoBlock}
 
-═══ STRICTLY FORBIDDEN ═══
-✗ Prices, discount tags, promo stickers, star ratings, barcodes
-✗ Logos, watermarks, Wildberries or WB brand marks anywhere
-
-═══ QUALITY DIRECTIVES ═══
-photorealistic · award-winning product photography · ultra-sharp focus on product · 4K detail · cinematic lighting · premium composition · masterpiece · high fidelity${imageRolesBlock}${bgStyleHarmonyBlock}${wishes ? `\n\n═══ USER REQUESTS (important) ═══\n${wishes}` : ''}${textOverlays ? `\n\n═══ ADDITIONAL TEXT TO RENDER (user specified — reproduce exactly as written) ═══\n${textOverlays}` : ''}`;
+${qualityBlock}${imageRolesBlock}${bgStyleHarmonyBlock}${wishes ? `\n\n═══ USER REQUESTS ═══\n${wishes}` : ''}${textOverlays ? `\n\n═══ EXTRA TEXT TO RENDER (quoted content remains exact) ═══\n${textOverlays}` : ''}`;
 }
 
 async function submitToolsRequest(task) {
@@ -7884,12 +8111,12 @@ async function submitToolsRequest(task) {
   if (aspectRatio) body.aspect_ratio = aspectRatio;
 
   if (!isGpt) {
-    const webSearch = qs('toolsWebSearch') ? qs('toolsWebSearch').value : 'true';
+    const webSearch = qs('toolsWebSearch') ? qs('toolsWebSearch').value : 'false';
     if (webSearch === 'true') body.enable_web_search = true;
   }
 
   if (isNano2) {
-    const googleSearch = qs('toolsGoogleSearch') ? qs('toolsGoogleSearch').value : 'true';
+    const googleSearch = qs('toolsGoogleSearch') ? qs('toolsGoogleSearch').value : 'false';
     if (googleSearch === 'true') body.enable_google_search = true;
 
     const seed = qs('toolsSeed') ? String(qs('toolsSeed').value || '').trim() : '';
@@ -8957,17 +9184,45 @@ function getHistoryFallbackLabel(item) {
 
 // Get appropriate thumbnail for history item — prefer small thumbnailUrl over full-res url
 function getHistoryThumb(item) {
+  const meta = item && item.meta && typeof item.meta === 'object' ? item.meta : null;
   if (item.type === 'video') {
-    return item.thumbnailUrl || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><polygon fill="#fff" points="26,20 26,44 46,32"/></svg>')}`;
+    return pickHistoryPreviewCandidate(item, [
+      item.thumbnailUrl,
+      meta && meta.thumbnail_fallback,
+      meta && meta.previewUrl,
+    ]) || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><polygon fill="#fff" points="26,20 26,44 46,32"/></svg>')}`;
   }
   if (item.type === 'audio') {
-    return item.thumbnailUrl || createAudioPlaceholderDataUrl('AUDIO');
+    return pickHistoryPreviewCandidate(item, [
+      item.thumbnailUrl,
+      meta && meta.previewUrl,
+      meta && meta.thumbnail_fallback,
+    ]) || createAudioPlaceholderDataUrl('AUDIO');
   }
   if (item.type === '3d') {
-    return item.thumbnailUrl || item.url || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><path fill="#fff" d="M32 16L48 26V42L32 52L16 42V26L32 16Z" stroke="#fff" stroke-width="2" fill="none"/></svg>')}`;
+    return pickHistoryPreviewCandidate(item, [
+      item.thumbnailUrl,
+      meta && meta.thumbnail_fallback,
+      meta && meta.previewUrl,
+      meta && meta.placeholderUrl,
+      item.url,
+    ]) || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><path fill="#fff" d="M32 16L48 26V42L32 52L16 42V26L32 16Z" stroke="#fff" stroke-width="2" fill="none"/></svg>')}`;
   }
-  // For images: prefer the small thumbnailUrl data URI over the full-res url
-  return item.thumbnailUrl || item.url || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><path fill="#fff" d="M15 45L26 31L34 39L43 28L52 45H15Z" opacity="0.9"/><circle cx="24" cy="21" r="5" fill="#fff" opacity="0.95"/></svg>')}`;
+  return pickHistoryPreviewCandidate(item, [
+    item.thumbnailUrl,
+    meta && meta.thumbnail_fallback,
+    meta && meta.previewUrl,
+  ]) || item.url || `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect fill="#1a1a2e" width="64" height="64" rx="8"/><path fill="#fff" d="M15 45L26 31L34 39L43 28L52 45H15Z" opacity="0.9"/><circle cx="24" cy="21" r="5" fill="#fff" opacity="0.95"/></svg>')}`;
+}
+
+function updateHistoryClearButtons() {
+  const disabled = historyClearInFlight || !Array.isArray(history) || history.length === 0;
+  ['historyClearAllBtn', 'fhgClearAllBtn'].forEach((id) => {
+    const btn = qs(id);
+    if (!btn) return;
+    btn.disabled = disabled;
+    btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+  });
 }
 
 function getHistoryQueryTerms(query) {
@@ -9004,6 +9259,7 @@ const historyThumbnailPendingKeys = new Set();
 const historyThumbnailQueue = [];
 let historyThumbnailTimer = null;
 let historyThumbnailRunning = false;
+let historyClearInFlight = false;
 
 function queueHistoryThumbnailForItem(item, index = 0) {
   if (!canGenerateClientHistoryThumbnail(item)) return;
@@ -9030,8 +9286,9 @@ async function processHistoryThumbnailQueue() {
   historyThumbnailRunning = true;
   let changed = false;
   let processed = 0;
+  const maxPerPass = isPrimaryCoarsePointer() ? 1 : 2;
 
-  while (historyThumbnailQueue.length > 0 && processed < 2) {
+  while (historyThumbnailQueue.length > 0 && processed < maxPerPass) {
     const work = historyThumbnailQueue.shift();
     if (!work || !work.item) continue;
     const { item, key } = work;
@@ -9039,8 +9296,10 @@ async function processHistoryThumbnailQueue() {
       let thumb = null;
       if (item.type === 'video') {
         thumb = await generateVideoThumbnail(item.url);
+      } else if (item.type === 'image') {
+        thumb = await generateImageThumbnail(item.url);
       }
-      if (thumb && !item.thumbnailUrl) {
+      if (thumb && !hasUsableHistoryPreview(item)) {
         item.thumbnailUrl = thumb;
         changed = true;
       }
@@ -9187,6 +9446,7 @@ function updateHistoryUI() {
   const meta = qs('historyResultsMeta');
   const searchInput = qs('historySearchInput');
   if (!list || !empty || !emptyText || !meta) return;
+  updateHistoryClearButtons();
 
   if (searchInput && searchInput.value !== historyViewState.query) {
     historyViewState.query = searchInput.value || '';
@@ -9232,7 +9492,7 @@ function updateHistoryUI() {
       ? new Date(item.timestamp).toLocaleTimeString(window.I18N ? I18N.lang : undefined)
       : '';
 
-    parts.push(`<div class="history-item" data-index="${idx}"><div class="history-content"><div class="history-thumb-wrap"><img src="${escapeHtml(thumbSrc)}" class="history-thumb" loading="lazy" decoding="async" draggable="false" alt=""><div class="history-icon">${_hIcon(icon)}</div></div><div class="history-info"><div class="history-prompt">${escapeHtml(promptText)}</div><div class="history-time">${escapeHtml(timeText)}</div></div></div><div class="history-actions"><button class="history-action-btn" data-action="reuse" title="Reuse Prompt & Settings">${_hIcon('repeat-2')}</button><button class="history-action-btn" data-action="use-asset" title="Use as Asset">${_hIcon('package-plus')}</button><button class="history-action-btn" data-action="download" title="Download">${_hIcon('download')}</button><button class="history-action-btn history-action-btn--danger" data-action="delete" title="Delete">${_hIcon('trash-2')}</button></div></div>`);
+    parts.push(`<div class="history-item" data-index="${idx}"><div class="history-content"><div class="history-thumb-wrap"><img src="${escapeHtml(thumbSrc)}" class="history-thumb" loading="lazy" decoding="async" fetchpriority="low" draggable="false" alt=""><div class="history-icon">${_hIcon(icon)}</div></div><div class="history-info"><div class="history-prompt">${escapeHtml(promptText)}</div><div class="history-time">${escapeHtml(timeText)}</div></div></div><div class="history-actions"><button class="history-action-btn" data-action="reuse" title="Reuse Prompt & Settings">${_hIcon('repeat-2')}</button><button class="history-action-btn" data-action="use-asset" title="Use as Asset">${_hIcon('package-plus')}</button><button class="history-action-btn" data-action="download" title="Download">${_hIcon('download')}</button><button class="history-action-btn history-action-btn--danger" data-action="delete" title="Delete">${_hIcon('trash-2')}</button></div></div>`);
   }
 
   list.innerHTML = parts.join('');
@@ -9301,6 +9561,7 @@ function handleHistoryClick(e) {
 function addToHistory(item) {
   ensureHistoryItemIdentity(item);
   history.unshift(item);
+  queueHistoryThumbnailForItem(item, 0);
   saveHistory();
   scheduleHistoryUIUpdate();
   queueAccountHistoryPersist(item);
@@ -9447,6 +9708,7 @@ function renderFhgGallery() {
   const empty = qs('fhgEmpty');
   const meta = qs('fhgMeta');
   if (!grid) return;
+  updateHistoryClearButtons();
 
   // Skip animations on filter/search updates (not the first open)
   const skipAnim = !_fhgFirstRender;
@@ -9495,7 +9757,7 @@ function renderFhgGallery() {
 
     parts.push(
       `<div class="fhg-card" data-index="${idx}">` +
-        `<img class="fhg-card-img" src="${escapeHtml(thumbSrc)}" loading="lazy" alt="">` +
+        `<img class="fhg-card-img" src="${escapeHtml(thumbSrc)}" loading="lazy" decoding="async" fetchpriority="low" alt="">` +
         `<div class="fhg-card-type">${_hIcon(icon)}</div>` +
         `<div class="fhg-card-actions">` +
           `<button class="fhg-card-action" data-action="download" title="Download">${_hIcon('download')}</button>` +
@@ -9559,6 +9821,7 @@ const _origKeydownForFhg = window.addEventListener('keydown', function _fhgEsc(e
 function addToHistorySilent(item) {
   ensureHistoryItemIdentity(item);
   history.unshift(item);
+  queueHistoryThumbnailForItem(item, 0);
 }
 
 // Debounced history save — coalesces multiple thumbnail saves into one write
@@ -9596,6 +9859,43 @@ function deleteFromHistory(index, event) {
   if (removed) queueAccountHistoryDelete(removed);
 }
 window.deleteFromHistory = deleteFromHistory;
+
+async function clearAllHistory(event) {
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+  if (historyClearInFlight) return;
+  if (!Array.isArray(history) || history.length === 0) return;
+
+  const confirmText = i18nText('history_clear_all_confirm', 'Remove all history items? This cannot be undone.');
+  if (!window.confirm(confirmText)) return;
+
+  const previousHistory = history.slice();
+  historyClearInFlight = true;
+  history = [];
+  saveHistory();
+  scheduleHistoryUIUpdate();
+  if (_fhgState.open) renderFhgGallery();
+  updateHistoryClearButtons();
+
+  try {
+    const bridge = window.NanoAccountBridge || null;
+    const userId = bridge && typeof bridge.getScopedUserId === 'function' ? bridge.getScopedUserId() : null;
+    if (userId && typeof bridge.clearHistory === 'function') {
+      await bridge.clearHistory();
+    }
+    showToast(i18nText('toast_history_cleared', 'History cleared'));
+  } catch (error) {
+    console.error('clear history failed', error);
+    history = previousHistory;
+    saveHistory();
+    scheduleHistoryUIUpdate();
+    if (_fhgState.open) renderFhgGallery();
+    showToast((i18nText('toast_history_clear_failed', 'Failed to clear history: ') || 'Failed to clear history: ') + (error && error.message ? error.message : error), 'error');
+  } finally {
+    historyClearInFlight = false;
+    updateHistoryClearButtons();
+  }
+}
+window.clearAllHistory = clearAllHistory;
 
 function downloadFromHistory(index, event) {
   event.stopPropagation();
@@ -12120,9 +12420,14 @@ function mergePersistedHistoryItems(localItems, savedItems) {
   saved.forEach((savedItem, index) => {
     const target = list[index];
     if (!target || !savedItem) return;
+    const preservedThumbnail = hasUsableHistoryPreview(target) ? target.thumbnailUrl : null;
     Object.assign(target, savedItem, { cloud: true });
+    if (preservedThumbnail && !hasUsableHistoryPreview(target)) {
+      target.thumbnailUrl = preservedThumbnail;
+    }
     delete target.__accountPersistQueued;
     if (currentPreview === target) displayResult(target);
+    if (!hasUsableHistoryPreview(target)) queueHistoryThumbnailForItem(target, index);
   });
   saveHistory();
   scheduleHistoryUIUpdate();
@@ -12308,6 +12613,7 @@ initModels();
 initInputs();
 initModelViewerTouchFix();
 initHistoryControls();
+initGlobalImagePaste();
 // History UI is lazy — built on first drawer open (see toggleHistory)
 renderTasks();
 initTasks();

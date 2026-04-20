@@ -4088,6 +4088,44 @@
     Object.assign(window.TRANSLATIONS[locale], values);
   }
 })();
+
+(function applyHistoryActionTranslations() {
+  if (!window.TRANSLATIONS) return;
+  const english = {
+    history_clear_all: 'Clear all',
+    history_clear_all_title: 'Remove every history item',
+    history_clear_all_confirm: 'Remove all history items? This cannot be undone.',
+    toast_history_cleared: 'History cleared',
+    toast_history_clear_failed: 'Failed to clear history: ',
+    toast_image_pasted: 'Image pasted',
+    toast_image_paste_no_target: 'Open an image upload area first.',
+  };
+  const russian = {
+    history_clear_all: 'Очистить всё',
+    history_clear_all_title: 'Удалить все элементы истории',
+    history_clear_all_confirm: 'Удалить всю историю? Это действие нельзя отменить.',
+    toast_history_cleared: 'История очищена',
+    toast_history_clear_failed: 'Не удалось очистить историю: ',
+    toast_image_pasted: 'Изображение вставлено',
+    toast_image_paste_no_target: 'Сначала откройте область загрузки изображения.',
+  };
+  const localeValues = {
+    en: english,
+    es: english,
+    zh: english,
+    ar: english,
+    fr: english,
+    ru: { ...english, ...russian },
+    pt: english,
+    de: english,
+    ja: english,
+    ko: english,
+  };
+  for (const [locale, entries] of Object.entries(localeValues)) {
+    if (!window.TRANSLATIONS[locale]) continue;
+    Object.assign(window.TRANSLATIONS[locale], entries);
+  }
+})();
 (function applyHistoryHydrationTranslations() {
   if (!window.TRANSLATIONS) return;
   const values = {

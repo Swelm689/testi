@@ -1,4 +1,4 @@
-const { setCors, requireSupabaseUser, fetchAccountData, fetchHistoryPage, upsertProfile, replaceTextPresetStore, replaceDesignPresetState, saveHistoryItems, deleteHistoryItem, removeStorageObjects, readJsonBody } = require('../lib/_supabase');
+const { setCors, requireSupabaseUser, fetchAccountData, fetchHistoryPage, upsertProfile, replaceTextPresetStore, replaceDesignPresetState, saveHistoryItems, deleteHistoryItem, clearHistoryItems, removeStorageObjects, readJsonBody } = require('../lib/_supabase');
 
 const HISTORY_PAGE_LIMIT = 16;
 
@@ -117,6 +117,11 @@ module.exports = async function handler(req, res) {
       if (!body.id) return res.status(400).json({ error: 'id is required' });
       await deleteHistoryItem(ctx.admin, ctx.user.id, body.id);
       return res.status(200).json({ ok: true });
+    }
+
+    if (action === 'clear-history') {
+      const deletedCount = await clearHistoryItems(ctx.admin, ctx.user.id);
+      return res.status(200).json({ ok: true, deletedCount });
     }
 
     if (action === 'delete-owned-assets') {
