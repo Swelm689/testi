@@ -21,7 +21,8 @@ This file is the local source-of-truth summary for the Seedance 2.0 video family
 - ByteDance cinematic video family
 - Native audio generation supported
 - Strong camera direction and real-world physics
-- Output resolution options: `480p`, `720p`
+- Fast output resolution options: `480p`, `720p`
+- Pro output resolution options: `480p`, `720p`, `1080p`
 - Output duration options: `auto`, `4` through `15`
 - Shared seed support: `seed`
 - Shared optional user tracking field: `end_user_id`
@@ -34,7 +35,8 @@ This file is the local source-of-truth summary for the Seedance 2.0 video family
 
 ### Optional
 
-- `resolution`: `480p`, `720p`
+- Fast `resolution`: `480p`, `720p`
+- Pro `resolution`: `480p`, `720p`, `1080p`
 - `duration`: `auto`, `4`-`15`
 - `aspect_ratio`: `auto`, `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`
 - `generate_audio`: boolean, default `true`
@@ -51,7 +53,8 @@ This file is the local source-of-truth summary for the Seedance 2.0 video family
 ### Optional
 
 - `end_image_url`
-- `resolution`: `480p`, `720p`
+- Fast `resolution`: `480p`, `720p`
+- Pro `resolution`: `480p`, `720p`, `1080p`
 - `duration`: `auto`, `4`-`15`
 - `aspect_ratio`: `auto`, `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`
 - `generate_audio`: boolean, default `true`
@@ -75,7 +78,8 @@ This file is the local source-of-truth summary for the Seedance 2.0 video family
 - `image_urls`: up to `9`
 - `video_urls`: up to `3`
 - `audio_urls`: up to `3`
-- `resolution`: `480p`, `720p`
+- Fast `resolution`: `480p`, `720p`
+- Pro `resolution`: `480p`, `720p`, `1080p`
 - `duration`: `auto`, `4`-`15`
 - `aspect_ratio`: `auto`, `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`
 - `generate_audio`: boolean, default `true`
@@ -144,3 +148,12 @@ The UI should keep showing a token board based on uploaded references so users c
 ## Pricing Notes
 
 Fast and Pro variants have different per-second and token pricing, but pricing is display/documentation-only here and should not affect payload generation.
+
+## Source Update
+
+As of April 20, 2026, the machine-readable Fal `llms.txt` pages show:
+
+- Fast endpoints: `480p`, `720p`
+- Non-fast / Pro endpoints: `480p`, `720p`, `1080p`
+
+This app follows that split even though some older Fal documentation pages still mention only `480p` and `720p`.

@@ -346,11 +346,21 @@ const OPTION_DEFS = {
         "default": "auto",
         "label": "Aspect Ratio"
     },
-    "resolution_seedance2": {
+    "resolution_seedance2_fast": {
         "type": "select",
         "values": [
             "480p",
             "720p"
+        ],
+        "default": "720p",
+        "label": "Resolution"
+    },
+    "resolution_seedance2_pro": {
+        "type": "select",
+        "values": [
+            "480p",
+            "720p",
+            "1080p"
         ],
         "default": "720p",
         "label": "Resolution"
@@ -1261,7 +1271,8 @@ const OPTION_KEY_ALIASES = {
     "aspect_ratio_seedance2_t2v_ref": "aspect_ratio",
     "aspect_ratio_seedance2_i2v": "aspect_ratio",
     "resolution_seedance": "resolution",
-    "resolution_seedance2": "resolution",
+    "resolution_seedance2_fast": "resolution",
+    "resolution_seedance2_pro": "resolution",
     "aspect_ratio_sora": "aspect_ratio",
     "aspect_ratio_sora_i2v": "aspect_ratio",
     "resolution_sora": "resolution",
@@ -1473,7 +1484,7 @@ const VIDEO_MODELS = {
         "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/fast/text-to-video",
         "kind": "text-to-video",
         "allowedOptions": [
-            "resolution_seedance2",
+            "resolution_seedance2_fast",
             "duration_seedance2",
             "aspect_ratio_seedance2_t2v_ref",
             "generate_audio_on",
@@ -1486,7 +1497,7 @@ const VIDEO_MODELS = {
         "endpoint": "https://queue.fal.run/bytedance/seedance-2.0/text-to-video",
         "kind": "text-to-video",
         "allowedOptions": [
-            "resolution_seedance2",
+            "resolution_seedance2_pro",
             "duration_seedance2",
             "aspect_ratio_seedance2_t2v_ref",
             "generate_audio_on",
@@ -1837,7 +1848,7 @@ const VIDEO_MODELS = {
         "supportsEndImage": true,
         "endImageParam": "end_image_url",
         "allowedOptions": [
-            "resolution_seedance2",
+            "resolution_seedance2_fast",
             "duration_seedance2",
             "aspect_ratio_seedance2_i2v",
             "generate_audio_on",
@@ -1852,7 +1863,7 @@ const VIDEO_MODELS = {
         "supportsEndImage": true,
         "endImageParam": "end_image_url",
         "allowedOptions": [
-            "resolution_seedance2",
+            "resolution_seedance2_pro",
             "duration_seedance2",
             "aspect_ratio_seedance2_i2v",
             "generate_audio_on",
@@ -2134,7 +2145,7 @@ const VIDEO_MODELS = {
         "maxAudioUrls": 3,
         "maxTotalReferences": 12,
         "allowedOptions": [
-            "resolution_seedance2",
+            "resolution_seedance2_fast",
             "duration_seedance2",
             "aspect_ratio_seedance2_t2v_ref",
             "generate_audio_on",
@@ -2154,7 +2165,7 @@ const VIDEO_MODELS = {
         "maxAudioUrls": 3,
         "maxTotalReferences": 12,
         "allowedOptions": [
-            "resolution_seedance2",
+            "resolution_seedance2_pro",
             "duration_seedance2",
             "aspect_ratio_seedance2_t2v_ref",
             "generate_audio_on",
