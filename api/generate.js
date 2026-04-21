@@ -37,10 +37,20 @@ const IMAGE_MODELS = {
         kind: 'text-to-image',
         allowed: ['prompt', 'image_size', 'background', 'quality', 'num_images', 'output_format', 'sync_mode'],
     },
+    'openai/gpt-image-2': {
+        endpoint: 'https://queue.fal.run/openai/gpt-image-2',
+        kind: 'text-to-image',
+        allowed: ['prompt', 'image_size', 'quality', 'num_images', 'output_format', 'sync_mode'],
+    },
     'gpt-image-1.5/edit': {
         endpoint: 'https://queue.fal.run/fal-ai/gpt-image-1.5/edit',
         kind: 'image-to-image',
         allowed: ['prompt', 'image_urls', 'image_size', 'background', 'quality', 'input_fidelity', 'num_images', 'output_format', 'sync_mode', 'mask_image_url'],
+    },
+    'openai/gpt-image-2/edit': {
+        endpoint: 'https://queue.fal.run/openai/gpt-image-2/edit',
+        kind: 'image-to-image',
+        allowed: ['prompt', 'image_urls', 'image_size', 'quality', 'num_images', 'output_format', 'sync_mode', 'mask_url'],
     },
     'pixelcut/background-removal': {
         endpoint: 'https://queue.fal.run/pixelcut/background-removal',
@@ -188,6 +198,7 @@ module.exports = async function handler(req, res) {
             'nano-banana-pro/edit': 14,
             'nano-banana-2/edit': 14,
             'gpt-image-1.5/edit': 4,
+            'openai/gpt-image-2/edit': 4,
         };
 
         if (supportsImageUrls) {
@@ -218,6 +229,12 @@ module.exports = async function handler(req, res) {
             if (!parsed) throw new Error('Invalid mask image data URI');
             const ext = parsed.mimeType === 'image/png' ? 'png' : (parsed.mimeType === 'image/webp' ? 'webp' : 'jpg');
             rawPayload.mask_image_url = await uploadToFal(parsed.buffer, `mask-${Date.now()}.${ext}`, parsed.mimeType);
+        }
+        if (typeof rawPayload.mask_url === 'string' && rawPayload.mask_url.startsWith('data:')) {
+            const parsed = parseDataUri(rawPayload.mask_url);
+            if (!parsed) throw new Error('Invalid mask image data URI');
+            const ext = parsed.mimeType === 'image/png' ? 'png' : (parsed.mimeType === 'image/webp' ? 'webp' : 'jpg');
+            rawPayload.mask_url = await uploadToFal(parsed.buffer, `mask-${Date.now()}.${ext}`, parsed.mimeType);
         }
 
         const payload = pickAllowed(rawPayload, allowed);

@@ -117,16 +117,20 @@
                                 </select>
                             </div>
                         </div>
-                        <!-- GPT Image 1.5 Edit Settings -->
-                        <div id="gptEditOptions">
+                        <!-- GPT Image Edit Settings -->
+                        <div id="gptEditOptions" style="display:none;">
                             <div class="settings-row">
                                 <div class="field">
                                     <label>Size</label>
                                     <select id="editImageSize">
                                         <option value="auto">Auto</option>
-                                        <option value="1024x1024">1024²</option>
-                                        <option value="1536x1024">1536×1024</option>
-                                        <option value="1024x1536">1024×1536</option>
+                                        <option value="square_hd">Square HD</option>
+                                        <option value="square">Square</option>
+                                        <option value="portrait_4_3">Portrait 4:3</option>
+                                        <option value="portrait_16_9">Portrait 16:9</option>
+                                        <option value="landscape_4_3">Landscape 4:3</option>
+                                        <option value="landscape_16_9">Landscape 16:9</option>
+                                        <option value="custom">Custom</option>
                                     </select>
                                 </div>
                                 <div class="field">
@@ -138,8 +142,26 @@
                                     </select>
                                 </div>
                             </div>
+                            <div class="settings-row" id="gptEditCustomSizeFields" style="display:none;">
+                                <div class="field">
+                                    <label>Width</label>
+                                    <input type="number" id="editImageWidth" min="256" max="3840" step="16" placeholder="1024">
+                                </div>
+                                <div class="field">
+                                    <label>Height</label>
+                                    <input type="number" id="editImageHeight" min="256" max="3840" step="16" placeholder="1536">
+                                </div>
+                            </div>
+                            <div class="edit-max-hint" id="gptEditCustomSizeHint" style="display:none;"></div>
                             <div class="settings-row">
                                 <div class="field">
+                                    <label>Sync Mode</label>
+                                    <select id="editSyncMode">
+                                        <option value="false" selected>Off</option>
+                                        <option value="true">On</option>
+                                    </select>
+                                </div>
+                                <div class="field" id="editBackgroundField">
                                     <label>Background</label>
                                     <select id="editBackground">
                                         <option value="auto">Auto</option>
@@ -147,7 +169,9 @@
                                         <option value="transparent">Transparent</option>
                                     </select>
                                 </div>
-                                <div class="field">
+                            </div>
+                            <div class="settings-row">
+                                <div class="field" id="editInputFidelityField">
                                     <label>Fidelity</label>
                                     <select id="editInputFidelity">
                                         <option value="high">High</option>
@@ -1084,6 +1108,54 @@
                                             <input type="number" id="toolsSeed" placeholder="Random" />
                                         </div>
                                     </div>
+                                    <div class="settings-grid" id="toolsGptImageOptions" style="display:none;margin-top:0.75rem;">
+                                        <div class="field">
+                                            <label>Size</label>
+                                            <select id="toolsGptImageSize"></select>
+                                        </div>
+                                        <div class="field">
+                                            <label>Quality</label>
+                                            <select id="toolsGptQuality">
+                                                <option value="high" selected>High</option>
+                                                <option value="medium">Medium</option>
+                                                <option value="low">Low</option>
+                                            </select>
+                                        </div>
+                                        <div class="field">
+                                            <label>Output</label>
+                                            <select id="toolsGptOutputFormat">
+                                                <option value="png" selected>PNG</option>
+                                                <option value="jpeg">JPEG</option>
+                                                <option value="webp">WebP</option>
+                                            </select>
+                                        </div>
+                                        <div class="field" id="toolsGptBackgroundField" style="display:none;">
+                                            <label>Background</label>
+                                            <select id="toolsGptBackground">
+                                                <option value="auto">Auto</option>
+                                                <option value="opaque">Opaque</option>
+                                                <option value="transparent">Transparent</option>
+                                            </select>
+                                        </div>
+                                        <div class="field" id="toolsGptFidelityField" style="display:none;">
+                                            <label>Fidelity</label>
+                                            <select id="toolsGptFidelity">
+                                                <option value="high">High</option>
+                                                <option value="low">Low</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="settings-grid" id="toolsGptCustomSizeFields" style="display:none;margin-top:0.5rem;">
+                                        <div class="field">
+                                            <label>Width</label>
+                                            <input type="number" id="toolsGptImageWidth" min="256" max="3840" step="16" placeholder="1536">
+                                        </div>
+                                        <div class="field">
+                                            <label>Height</label>
+                                            <input type="number" id="toolsGptImageHeight" min="256" max="3840" step="16" placeholder="2048">
+                                        </div>
+                                    </div>
+                                    <div class="edit-max-hint" id="toolsGptCustomSizeHint" style="display:none;margin-top:0.35rem;"></div>
                                 </details>
                             </div>
                         </div>
@@ -1408,6 +1480,7 @@
                                 <select id="textOutputFormat">
                                     <option value="jpeg">JPEG</option>
                                     <option value="png">PNG</option>
+                                    <option value="webp">WebP</option>
                                 </select>
                             </div>
                         </div>
@@ -1446,20 +1519,31 @@
                             <div class="field">
                                 <label>Size</label>
                                 <select id="gptImageSize">
-                                    <option value="1024x1024">1024×1024</option>
-                                    <option value="1536x1024">1536×1024</option>
-                                    <option value="1024x1536">1024×1536</option>
+                                    <option value="landscape_4_3">Landscape 4:3</option>
+                                    <option value="landscape_16_9">Landscape 16:9</option>
+                                    <option value="square_hd">Square HD</option>
+                                    <option value="square">Square</option>
+                                    <option value="portrait_4_3">Portrait 4:3</option>
+                                    <option value="portrait_16_9">Portrait 16:9</option>
+                                    <option value="custom">Custom</option>
                                 </select>
                             </div>
                             <div class="field">
                                 <label>Quality</label>
                                 <select id="gptQuality">
                                     <option value="high">High</option>
-                                    <option value="medium">Medium</option>
-                                    <option value="low">Low</option>
+                                        <option value="medium">Medium</option>
+                                        <option value="low">Low</option>
+                                    </select>
+                                </div>
+                            <div class="field">
+                                <label>Sync Mode</label>
+                                <select id="gptSyncMode">
+                                    <option value="false" selected>Off</option>
+                                    <option value="true">On</option>
                                 </select>
                             </div>
-                            <div class="field">
+                            <div class="field" id="gptBackgroundField">
                                 <label>Background</label>
                                 <select id="gptBackground">
                                     <option value="auto">Auto</option>
@@ -1468,6 +1552,17 @@
                                 </select>
                             </div>
                         </div>
+                        <div class="settings-grid" id="gptTextCustomSizeFields" style="display:none;">
+                            <div class="field">
+                                <label>Width</label>
+                                <input type="number" id="gptImageWidth" min="256" max="3840" step="16" placeholder="1536">
+                            </div>
+                            <div class="field">
+                                <label>Height</label>
+                                <input type="number" id="gptImageHeight" min="256" max="3840" step="16" placeholder="2048">
+                            </div>
+                        </div>
+                        <div class="edit-max-hint" id="gptTextCustomSizeHint" style="display:none;"></div>
                         <!-- Nano Banana Pro specific options -->
                         <div class="settings-grid" id="nanoBananaOptions" style="display:none;">
                             <div class="field">

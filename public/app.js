@@ -688,14 +688,63 @@ async function ensureFileLikeAssetItem(item) {
   });
 }
 const NEWS_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const GPT_IMAGE_15_TEXT_MODEL_ID = 'gpt-image-1.5';
+const GPT_IMAGE_15_EDIT_MODEL_ID = 'gpt-image-1.5/edit';
+const GPT_IMAGE_2_TEXT_MODEL_ID = 'openai/gpt-image-2';
+const GPT_IMAGE_2_EDIT_MODEL_ID = 'openai/gpt-image-2/edit';
+const GPT_IMAGE_TEXT_MODEL_IDS = new Set([GPT_IMAGE_15_TEXT_MODEL_ID, GPT_IMAGE_2_TEXT_MODEL_ID]);
+const GPT_IMAGE_EDIT_MODEL_IDS = new Set([GPT_IMAGE_15_EDIT_MODEL_ID, GPT_IMAGE_2_EDIT_MODEL_ID]);
+const GPT_IMAGE_15_TEXT_SIZE_OPTIONS = [
+  { value: '1024x1024', label: '1024×1024' },
+  { value: '1536x1024', label: '1536×1024' },
+  { value: '1024x1536', label: '1024×1536' },
+];
+const GPT_IMAGE_15_EDIT_SIZE_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  ...GPT_IMAGE_15_TEXT_SIZE_OPTIONS,
+];
+const GPT_IMAGE_2_BASE_SIZE_OPTIONS = [
+  { value: 'square_hd', label: 'Square HD' },
+  { value: 'square', label: 'Square' },
+  { value: 'portrait_4_3', label: 'Portrait 4:3' },
+  { value: 'portrait_16_9', label: 'Portrait 16:9' },
+  { value: 'landscape_4_3', label: 'Landscape 4:3' },
+  { value: 'landscape_16_9', label: 'Landscape 16:9' },
+];
+const GPT_IMAGE_2_TEXT_SIZE_OPTIONS = [
+  ...GPT_IMAGE_2_BASE_SIZE_OPTIONS,
+  { value: 'custom', label: 'Custom' },
+];
+const GPT_IMAGE_2_EDIT_SIZE_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  ...GPT_IMAGE_2_BASE_SIZE_OPTIONS,
+  { value: 'custom', label: 'Custom' },
+];
+const TEXT_OUTPUT_FORMAT_OPTIONS = [
+  { value: 'jpeg', label: 'JPEG' },
+  { value: 'png', label: 'PNG' },
+];
+const GPT_TEXT_OUTPUT_FORMAT_OPTIONS = [
+  ...TEXT_OUTPUT_FORMAT_OPTIONS,
+  { value: 'webp', label: 'WebP' },
+];
+const GPT_IMAGE_2_TEXT_DEFAULT_SIZE = 'landscape_4_3';
+const GPT_IMAGE_2_EDIT_DEFAULT_SIZE = 'auto';
+const GPT_IMAGE_2_TOOLS_DEFAULT_SIZE = 'custom';
+const GPT_IMAGE_2_TOOLS_DEFAULT_WIDTH = 1200;
+const GPT_IMAGE_2_TOOLS_DEFAULT_HEIGHT = 1600;
+const GPT_IMAGE_2_MIN_PIXELS = 655360;
+const GPT_IMAGE_2_MAX_PIXELS = 8294400;
+const GPT_IMAGE_2_MAX_EDGE = 3840;
 const DEFAULT_IMAGE_TEXT_MODEL = 'nano-banana-pro';
 const DEFAULT_IMAGE_EDIT_MODEL = 'nano-banana-pro/edit';
-const DEFAULT_TOOLS_MODEL = DEFAULT_IMAGE_EDIT_MODEL;
+const DEFAULT_TOOLS_MODEL = GPT_IMAGE_2_EDIT_MODEL_ID;
 const DEFAULT_3D_MODEL = 'fal-ai/meshy/v6-preview/image-to-3d';
 
 const IMAGE_MODELS_TEXT = [
   { id: 'nano-banana-pro', label: 'Nano Banana Pro' },
   { id: 'nano-banana-2', label: 'Nano Banana 2' },
+  { id: GPT_IMAGE_2_TEXT_MODEL_ID, label: 'GPT Image 2' },
   { id: 'gpt-image-1.5', label: 'GPT-Image 1.5' },
   { id: 'flux-pro-v1.1-ultra', label: 'Flux Pro v1.1 Ultra' },
 ];
@@ -703,6 +752,7 @@ const IMAGE_MODELS_TEXT = [
 const EDIT_MAX_IMAGES = {
   'nano-banana-2/edit': 14,
   'nano-banana-pro/edit': 14,
+  [GPT_IMAGE_2_EDIT_MODEL_ID]: 4,
   'gpt-image-1.5/edit': 4,
 };
 function editMaxImages() {
@@ -714,6 +764,7 @@ function editMaxImages() {
 const IMAGE_MODELS_EDIT = [
   { id: 'nano-banana-pro/edit', label: 'Nano Banana Pro (Edit)' },
   { id: 'nano-banana-2/edit', label: 'Nano Banana 2 (Edit)' },
+  { id: GPT_IMAGE_2_EDIT_MODEL_ID, label: 'GPT Image 2 (Edit)' },
   { id: 'gpt-image-1.5/edit', label: 'GPT-Image 1.5 (Edit)' },
 ];
 const TOOLS_MODELS = IMAGE_MODELS_EDIT.map((model) => ({
@@ -5214,6 +5265,271 @@ async function submitKling3Request(task) {
   return await res.json();
 }
 
+function replaceSelectOptions(selectEl, options, fallbackValue) {
+  if (!selectEl) return;
+  const currentValue = String(selectEl.value || '').trim();
+  const nextValue = options.some((option) => option.value === currentValue)
+    ? currentValue
+    : (options.some((option) => option.value === fallbackValue) ? fallbackValue : (options[0] && options[0].value ? options[0].value : ''));
+  selectEl.innerHTML = '';
+  options.forEach((option) => {
+    const opt = document.createElement('option');
+    opt.value = option.value;
+    opt.textContent = option.label;
+    selectEl.appendChild(opt);
+  });
+  if (nextValue) selectEl.value = nextValue;
+}
+
+function parseGptImageDimension(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.round(num);
+}
+
+function snapToMultiple(value, step = 16, mode = 'round') {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  if (mode === 'ceil') return Math.ceil(num / step) * step;
+  if (mode === 'floor') return Math.floor(num / step) * step;
+  return Math.round(num / step) * step;
+}
+
+function getGptImage2CustomSizeBaseHint() {
+  return `Auto-adjusts to valid values. Max edge is ${GPT_IMAGE_2_MAX_EDGE}px. Total pixels must stay between ${GPT_IMAGE_2_MIN_PIXELS.toLocaleString()} and ${GPT_IMAGE_2_MAX_PIXELS.toLocaleString()}.`;
+}
+
+function setGptImage2CustomSizeHint(hintId, message, visible) {
+  const hintEl = qs(hintId);
+  if (!hintEl) return;
+  hintEl.textContent = message || getGptImage2CustomSizeBaseHint();
+  hintEl.style.display = visible ? 'block' : 'none';
+}
+
+function normalizeGptImage2CustomSize(width, height) {
+  if (!width || !height) {
+    return {
+      ok: false,
+      message: 'Enter both width and height.',
+      width,
+      height,
+    };
+  }
+
+  const originalWidth = width;
+  const originalHeight = height;
+  const notes = [];
+  let w = Math.max(16, Number(width) || 16);
+  let h = Math.max(16, Number(height) || 16);
+
+  if (w !== originalWidth || h !== originalHeight) {
+    notes.push('Minimum edge is 16px.');
+  }
+
+  if (w % 16 !== 0) {
+    w = snapToMultiple(w, 16, 'round');
+    notes.push('Width snaps to multiples of 16.');
+  }
+  if (h % 16 !== 0) {
+    h = snapToMultiple(h, 16, 'round');
+    notes.push('Height snaps to multiples of 16.');
+  }
+
+  const maxEdge = Math.max(w, h);
+  if (maxEdge > GPT_IMAGE_2_MAX_EDGE) {
+    const scale = GPT_IMAGE_2_MAX_EDGE / maxEdge;
+    w *= scale;
+    h *= scale;
+    notes.push(`Max edge is ${GPT_IMAGE_2_MAX_EDGE}px.`);
+  }
+
+  if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
+    if (w >= h) h = w / 3;
+    else w = h / 3;
+    notes.push('Max aspect ratio is 3:1.');
+  }
+
+  let pixels = w * h;
+  if (pixels > GPT_IMAGE_2_MAX_PIXELS) {
+    const scale = Math.sqrt(GPT_IMAGE_2_MAX_PIXELS / pixels);
+    w *= scale;
+    h *= scale;
+    notes.push(`Max total pixels is ${GPT_IMAGE_2_MAX_PIXELS.toLocaleString()}.`);
+  }
+
+  pixels = w * h;
+  if (pixels < GPT_IMAGE_2_MIN_PIXELS) {
+    const scale = Math.sqrt(GPT_IMAGE_2_MIN_PIXELS / pixels);
+    w *= scale;
+    h *= scale;
+    notes.push(`Minimum total pixels is ${GPT_IMAGE_2_MIN_PIXELS.toLocaleString()}.`);
+  }
+
+  w = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(w, 16, 'round') || 16));
+  h = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(h, 16, 'round') || 16));
+
+  if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
+    if (w >= h) h = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(w / 3, 16, 'ceil') || 16));
+    else w = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(h / 3, 16, 'ceil') || 16));
+  }
+
+  let guard = 0;
+  while (w * h < GPT_IMAGE_2_MIN_PIXELS && guard < 2048) {
+    guard += 1;
+    if ((w <= h || h >= GPT_IMAGE_2_MAX_EDGE) && w < GPT_IMAGE_2_MAX_EDGE) w += 16;
+    else if (h < GPT_IMAGE_2_MAX_EDGE) h += 16;
+    if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
+      if (w >= h) h = Math.max(h, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(w / 3, 16, 'ceil') || h));
+      else w = Math.max(w, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(h / 3, 16, 'ceil') || w));
+    }
+  }
+
+  guard = 0;
+  while (w * h > GPT_IMAGE_2_MAX_PIXELS && guard < 2048) {
+    guard += 1;
+    if ((w >= h || h <= 16) && w > 16) w -= 16;
+    else if (h > 16) h -= 16;
+    if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
+      if (w >= h) h = Math.max(16, Math.min(h, snapToMultiple(w / 3, 16, 'ceil') || h));
+      else w = Math.max(16, Math.min(w, snapToMultiple(h / 3, 16, 'ceil') || w));
+    }
+  }
+
+  const changed = w !== originalWidth || h !== originalHeight;
+  const detail = changed
+    ? `Adjusted to ${w} × ${h}. ${notes.join(' ')}`
+    : getGptImage2CustomSizeBaseHint();
+
+  return {
+    ok: true,
+    width: w,
+    height: h,
+    changed,
+    message: detail.trim() || getGptImage2CustomSizeBaseHint(),
+  };
+}
+
+function syncGptImage2CustomSizeFields(widthId, heightId, hintId, visible) {
+  const widthEl = qs(widthId);
+  const heightEl = qs(heightId);
+  if (!widthEl || !heightEl) return null;
+  const width = parseGptImageDimension(widthEl.value);
+  const height = parseGptImageDimension(heightEl.value);
+  if (!visible) {
+    setGptImage2CustomSizeHint(hintId, '', false);
+    return null;
+  }
+  if (!width || !height) {
+    setGptImage2CustomSizeHint(hintId, getGptImage2CustomSizeBaseHint(), true);
+    return null;
+  }
+  const normalized = normalizeGptImage2CustomSize(width, height);
+  if (!normalized || !normalized.ok) {
+    setGptImage2CustomSizeHint(hintId, normalized && normalized.message ? normalized.message : getGptImage2CustomSizeBaseHint(), true);
+    return normalized;
+  }
+  if (normalized.changed) {
+    widthEl.value = String(normalized.width);
+    heightEl.value = String(normalized.height);
+  }
+  setGptImage2CustomSizeHint(hintId, normalized.message, true);
+  return normalized;
+}
+
+function buildGptImageSizePayload(selectId, widthId, heightId, hintId, modelId) {
+  const selectEl = qs(selectId);
+  const sizeValue = selectEl ? String(selectEl.value || '').trim() : '';
+  if (!sizeValue) return null;
+  if (modelId !== GPT_IMAGE_2_TEXT_MODEL_ID && modelId !== GPT_IMAGE_2_EDIT_MODEL_ID) {
+    return sizeValue;
+  }
+  if (sizeValue !== 'custom') return sizeValue;
+  const normalized = syncGptImage2CustomSizeFields(widthId, heightId, hintId, true);
+  if (!normalized || !normalized.ok) throw new Error((normalized && normalized.message) || 'Enter both width and height.');
+  return { width: normalized.width, height: normalized.height };
+}
+
+function updateGptTextControls() {
+  const modelSel = qs('imageModelText');
+  const modelId = modelSel ? modelSel.value : '';
+  const isGpt15 = modelId === GPT_IMAGE_15_TEXT_MODEL_ID;
+  const isGpt2 = modelId === GPT_IMAGE_2_TEXT_MODEL_ID;
+  const sizeSelect = qs('gptImageSize');
+  const bgField = qs('gptBackgroundField');
+  const customFields = qs('gptTextCustomSizeFields');
+
+  if (sizeSelect) {
+    const options = isGpt2 ? GPT_IMAGE_2_TEXT_SIZE_OPTIONS : GPT_IMAGE_15_TEXT_SIZE_OPTIONS;
+    const fallback = isGpt2 ? GPT_IMAGE_2_TEXT_DEFAULT_SIZE : GPT_IMAGE_15_TEXT_SIZE_OPTIONS[0].value;
+    replaceSelectOptions(sizeSelect, options, fallback);
+  }
+  if (bgField) bgField.style.display = isGpt15 ? '' : 'none';
+  const customVisible = !!(isGpt2 && sizeSelect && sizeSelect.value === 'custom');
+  if (customFields) customFields.style.display = customVisible ? 'grid' : 'none';
+  syncGptImage2CustomSizeFields('gptImageWidth', 'gptImageHeight', 'gptTextCustomSizeHint', customVisible);
+}
+
+function updateGptEditControls() {
+  const modelSel = qs('imageModelEdit');
+  const modelId = modelSel ? modelSel.value : '';
+  const isGpt15 = modelId === GPT_IMAGE_15_EDIT_MODEL_ID;
+  const isGpt2 = modelId === GPT_IMAGE_2_EDIT_MODEL_ID;
+  const sizeSelect = qs('editImageSize');
+  const bgField = qs('editBackgroundField');
+  const fidelityField = qs('editInputFidelityField');
+  const customFields = qs('gptEditCustomSizeFields');
+
+  if (sizeSelect) {
+    const options = isGpt2 ? GPT_IMAGE_2_EDIT_SIZE_OPTIONS : GPT_IMAGE_15_EDIT_SIZE_OPTIONS;
+    const fallback = isGpt2 ? GPT_IMAGE_2_EDIT_DEFAULT_SIZE : GPT_IMAGE_15_EDIT_SIZE_OPTIONS[0].value;
+    replaceSelectOptions(sizeSelect, options, fallback);
+  }
+  if (bgField) bgField.style.display = isGpt15 ? '' : 'none';
+  if (fidelityField) fidelityField.style.display = isGpt15 ? '' : 'none';
+  const customVisible = !!(isGpt2 && sizeSelect && sizeSelect.value === 'custom');
+  if (customFields) customFields.style.display = customVisible ? 'grid' : 'none';
+  syncGptImage2CustomSizeFields('editImageWidth', 'editImageHeight', 'gptEditCustomSizeHint', customVisible);
+}
+
+function updateToolsGptControls() {
+  const modelSel = qs('toolsModel');
+  const modelId = modelSel ? modelSel.value : DEFAULT_TOOLS_MODEL;
+  const isGpt15 = modelId === GPT_IMAGE_15_EDIT_MODEL_ID;
+  const isGpt2 = modelId === GPT_IMAGE_2_EDIT_MODEL_ID;
+  const wrap = qs('toolsGptImageOptions');
+  const sizeSelect = qs('toolsGptImageSize');
+  const customFields = qs('toolsGptCustomSizeFields');
+  const bgField = qs('toolsGptBackgroundField');
+  const fidelityField = qs('toolsGptFidelityField');
+
+  if (wrap) wrap.style.display = (isGpt15 || isGpt2) ? 'grid' : 'none';
+  if (sizeSelect) {
+    const lastModelId = String(sizeSelect.dataset.modelId || '');
+    const options = isGpt2 ? GPT_IMAGE_2_EDIT_SIZE_OPTIONS : GPT_IMAGE_15_EDIT_SIZE_OPTIONS;
+    const fallback = isGpt2 ? GPT_IMAGE_2_TOOLS_DEFAULT_SIZE : '1024x1536';
+    replaceSelectOptions(sizeSelect, options, fallback);
+    if (((lastModelId && lastModelId !== modelId) || !lastModelId) && isGpt2) sizeSelect.value = GPT_IMAGE_2_TOOLS_DEFAULT_SIZE;
+    sizeSelect.dataset.modelId = modelId;
+  }
+  if (isGpt2) {
+    const widthInput = qs('toolsGptImageWidth');
+    const heightInput = qs('toolsGptImageHeight');
+    if (widthInput && (!String(widthInput.value || '').trim() || String(widthInput.dataset.modelId || '') !== modelId)) {
+      widthInput.value = String(GPT_IMAGE_2_TOOLS_DEFAULT_WIDTH);
+    }
+    if (heightInput && (!String(heightInput.value || '').trim() || String(heightInput.dataset.modelId || '') !== modelId)) {
+      heightInput.value = String(GPT_IMAGE_2_TOOLS_DEFAULT_HEIGHT);
+    }
+    if (widthInput) widthInput.dataset.modelId = modelId;
+    if (heightInput) heightInput.dataset.modelId = modelId;
+  }
+  if (bgField) bgField.style.display = isGpt15 ? '' : 'none';
+  if (fidelityField) fidelityField.style.display = isGpt15 ? '' : 'none';
+  const customVisible = !!(isGpt2 && sizeSelect && sizeSelect.value === 'custom');
+  if (customFields) customFields.style.display = customVisible ? 'grid' : 'none';
+  syncGptImage2CustomSizeFields('toolsGptImageWidth', 'toolsGptImageHeight', 'toolsGptCustomSizeHint', customVisible);
+}
+
 function updateTextModelOptions() {
   const modelSel = qs('imageModelText');
   const modelId = modelSel ? modelSel.value : '';
@@ -5223,11 +5539,16 @@ function updateTextModelOptions() {
   const nanoOpts = qs('nanoBananaOptions');
   const nano2Opts = qs('nanoBanana2Options');
   const aspectGroup = qs('aspectRatioBaseGroup');
+  const outputFormatSel = qs('textOutputFormat');
   
   const isFlux = modelId === 'flux-pro-v1.1-ultra';
-  const isGpt = modelId === 'gpt-image-1.5';
+  const isGpt = GPT_IMAGE_TEXT_MODEL_IDS.has(modelId);
   const isNano = modelId === 'nano-banana-pro';
   const isNano2 = modelId === 'nano-banana-2';
+
+  if (outputFormatSel) {
+    replaceSelectOptions(outputFormatSel, isGpt ? GPT_TEXT_OUTPUT_FORMAT_OPTIONS : TEXT_OUTPUT_FORMAT_OPTIONS, isGpt ? 'png' : 'jpeg');
+  }
   
   if (fluxOpts) {
     fluxOpts.style.display = isFlux ? 'grid' : 'none';
@@ -5235,7 +5556,10 @@ function updateTextModelOptions() {
   }
   if (gptOpts) {
     gptOpts.style.display = isGpt ? 'grid' : 'none';
-    if (isGpt) animateGrid(gptOpts);
+    if (isGpt) {
+      updateGptTextControls();
+      animateGrid(gptOpts);
+    }
   }
   if (nanoOpts) {
     nanoOpts.style.display = isNano ? 'grid' : 'none';
@@ -5256,13 +5580,16 @@ function updateEditModelOptions() {
   const nanoEditOpts = qs('nanoEditOptions');
   const nano2EditOpts = qs('nano2EditOptions');
   
-  const isGpt = modelId === 'gpt-image-1.5/edit';
+  const isGpt = GPT_IMAGE_EDIT_MODEL_IDS.has(modelId);
   const isNano = modelId === 'nano-banana-pro/edit';
   const isNano2 = modelId === 'nano-banana-2/edit';
   
   if (gptEditOpts) {
     gptEditOpts.style.display = isGpt ? 'block' : 'none';
-    if (isGpt) animateGrid(gptEditOpts);
+    if (isGpt) {
+      updateGptEditControls();
+      animateGrid(gptEditOpts);
+    }
   }
   if (nanoEditOpts) {
     nanoEditOpts.style.display = isNano ? 'block' : 'none';
@@ -6111,6 +6438,13 @@ function initToolsControls() {
   const dropzone = qs('toolsImageDropzone');
   if (dropzone && imgInput) setupDropZone(dropzone, imgInput);
 
+  const toolsGptSizeSel = qs('toolsGptImageSize');
+  if (toolsGptSizeSel) toolsGptSizeSel.addEventListener('change', updateToolsGptControls);
+  ['toolsGptImageWidth', 'toolsGptImageHeight'].forEach((id) => {
+    const el = qs(id);
+    if (el) el.addEventListener('change', () => syncGptImage2CustomSizeFields('toolsGptImageWidth', 'toolsGptImageHeight', 'toolsGptCustomSizeHint', !!(qs('toolsGptImageSize') && qs('toolsGptImageSize').value === 'custom')));
+  });
+
   wizBuildTitleChips();
   wizBuildCharChips();
   wizBuildFontCards();
@@ -6722,15 +7056,15 @@ function wizUpdateToolsSettings() {
   const model = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
   const isNano2 = model === 'nano-banana-2/edit';
   const isNanoPro = model === 'nano-banana-pro/edit';
-  const isGpt = model === 'gpt-image-1.5/edit';
+  const isGpt = GPT_IMAGE_EDIT_MODEL_IDS.has(model);
 
   // Resolution: available for nano models only
   const fRes = document.getElementById('toolsFieldResolution');
   if (fRes) fRes.style.display = isGpt ? 'none' : '';
 
-  // Aspect: available for all
+  // Aspect: nano models only, GPT models use image_size presets
   const fAsp = document.getElementById('toolsFieldAspect');
-  if (fAsp) fAsp.style.display = '';
+  if (fAsp) fAsp.style.display = isGpt ? 'none' : '';
 
   // Web search: nano models
   const fWeb = document.getElementById('toolsFieldWebSearch');
@@ -6743,6 +7077,8 @@ function wizUpdateToolsSettings() {
   // Seed: nano-banana-2 only
   const fSeed = document.getElementById('toolsFieldSeed');
   if (fSeed) fSeed.style.display = isNano2 ? '' : 'none';
+
+  updateToolsGptControls();
 
   // Enforce image limit for model change
   const max = wizMaxImages();
@@ -7749,6 +8085,7 @@ function assembleWbCardPrompt(productImageCount) {
   const charsBlock = featureLines.map(c => `  • ${c}`).join('\n');
   const exactTitle = quoteExact(title);
   const exactFeatureBlock = featureLines.map((c, index) => `${index + 1}. ${quoteExact(c)}`).join('\n');
+  const alwaysOnWildberriesGuideline = 'Creat product desighn profesional eye cating , for wildberis do serch how to do good cards for wildberis';
   const textOverlays = skGetTextOverlaysForPrompt();
   const inspoPresetCount = getInspoPresetSources().length;
   const inspoUploadCount = uploadedInspoImages.length;
@@ -7856,6 +8193,9 @@ Premium e-commerce art direction · strong visual hierarchy · high readability 
 
 Goal: make an original, conversion-focused hero card that feels creatively art-directed from the references while keeping the product exact and the user text exact.
 
+═══ MAIN GUIDELINE ═══
+${alwaysOnWildberriesGuideline}
+
 ═══ CANVAS ═══
 Portrait 3:4. Premium commercial product-card aesthetic. Ultra-sharp, 4K-ready, polished, high-end, coherent.
 
@@ -7914,6 +8254,9 @@ ${typographyTransferBlock}`;
   }
 
   return `Create one premium Wildberries marketplace product card. This is a structured edit-and-design task: preserve the product exactly, render the text exactly, and build a fresh premium card around it.
+
+═══ MAIN GUIDELINE ═══
+${alwaysOnWildberriesGuideline}
 
 ═══ CANVAS ═══
 Format: portrait 3:4 ratio. Style: photorealistic commercial product photography. Quality: ultra-sharp, 4K resolution, award-winning composition, cinematic lighting, masterpiece.
@@ -8086,7 +8429,8 @@ async function submitToolsRequest(task) {
 
   const modelId = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
   const isNano2 = modelId === 'nano-banana-2/edit';
-  const isGpt = modelId === 'gpt-image-1.5/edit';
+  const isGpt = GPT_IMAGE_EDIT_MODEL_IDS.has(modelId);
+  const isGpt15 = modelId === GPT_IMAGE_15_EDIT_MODEL_ID;
   const body = { model_id: modelId, prompt: task.prompt };
 
   const imageUrls = await resolveUploadItemUrls(uploadedToolsImages, 'tools-ref', task);
@@ -8107,8 +8451,27 @@ async function submitToolsRequest(task) {
     if (resolution) body.resolution = resolution;
   }
 
-  const aspectRatio = qs('toolsAspectRatio') ? qs('toolsAspectRatio').value : '3:4';
-  if (aspectRatio) body.aspect_ratio = aspectRatio;
+  if (!isGpt) {
+    const aspectRatio = qs('toolsAspectRatio') ? qs('toolsAspectRatio').value : '3:4';
+    if (aspectRatio) body.aspect_ratio = aspectRatio;
+  } else {
+    const imageSize = buildGptImageSizePayload('toolsGptImageSize', 'toolsGptImageWidth', 'toolsGptImageHeight', 'toolsGptCustomSizeHint', modelId);
+    if (imageSize) body.image_size = imageSize;
+
+    const quality = qs('toolsGptQuality') ? qs('toolsGptQuality').value : 'high';
+    if (quality) body.quality = quality;
+
+    const outputFormat = qs('toolsGptOutputFormat') ? qs('toolsGptOutputFormat').value : 'png';
+    if (outputFormat) body.output_format = outputFormat;
+
+    if (isGpt15) {
+      const background = qs('toolsGptBackground') ? qs('toolsGptBackground').value : 'auto';
+      if (background) body.background = background;
+
+      const fidelity = qs('toolsGptFidelity') ? qs('toolsGptFidelity').value : 'high';
+      if (fidelity) body.input_fidelity = fidelity;
+    }
+  }
 
   if (!isGpt) {
     const webSearch = qs('toolsWebSearch') ? qs('toolsWebSearch').value : 'false';
@@ -10775,8 +11138,9 @@ async function submitImageRequest(task) {
 
   if (task.mode === 'text') {
     // Common settings
+    const isGptTextModel = GPT_IMAGE_TEXT_MODEL_IDS.has(modelId);
     const aspect = qs('aspectRatioBase') ? qs('aspectRatioBase').value : '';
-    if (aspect) body.aspect_ratio = aspect;
+    if (!isGptTextModel && aspect) body.aspect_ratio = aspect;
 
     const numImages = qs('textNumImages') ? qs('textNumImages').value : '1';
     body.num_images = Number(numImages) || 1;
@@ -10800,8 +11164,8 @@ async function submitImageRequest(task) {
     }
 
     // GPT Image specific settings
-    if (modelId === 'gpt-image-1.5') {
-      const imageSize = qs('gptImageSize') ? qs('gptImageSize').value : '';
+    if (modelId === GPT_IMAGE_15_TEXT_MODEL_ID) {
+      const imageSize = buildGptImageSizePayload('gptImageSize', 'gptImageWidth', 'gptImageHeight', 'gptTextCustomSizeHint', modelId);
       if (imageSize) body.image_size = imageSize;
 
       const quality = qs('gptQuality') ? qs('gptQuality').value : '';
@@ -10809,6 +11173,20 @@ async function submitImageRequest(task) {
 
       const background = qs('gptBackground') ? qs('gptBackground').value : '';
       if (background) body.background = background;
+
+      const syncMode = qs('gptSyncMode') ? qs('gptSyncMode').value : 'false';
+      if (syncMode === 'true') body.sync_mode = true;
+    }
+
+    if (modelId === GPT_IMAGE_2_TEXT_MODEL_ID) {
+      const imageSize = buildGptImageSizePayload('gptImageSize', 'gptImageWidth', 'gptImageHeight', 'gptTextCustomSizeHint', modelId);
+      if (imageSize) body.image_size = imageSize;
+
+      const quality = qs('gptQuality') ? qs('gptQuality').value : '';
+      if (quality) body.quality = quality;
+
+      const syncMode = qs('gptSyncMode') ? qs('gptSyncMode').value : 'false';
+      if (syncMode === 'true') body.sync_mode = true;
     }
 
     // Nano Banana Pro specific settings
@@ -10843,15 +11221,9 @@ async function submitImageRequest(task) {
     if (imageUrls.length === 0) throw new Error(window.I18N ? I18N.t('toast_upload_image') : 'Upload at least one image for Style mode');
     body.image_urls = imageUrls;
 
-    const maskSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.maskInput)[0] || uploadedMaskFile;
-    if (maskSource) {
-      const mu = await resolveUploadItemUrl(maskSource, 'mask', task);
-      if (mu) body.mask_image_url = mu;
-    }
-
     // GPT Image 1.5 Edit settings
-    if (modelId === 'gpt-image-1.5/edit') {
-      const imageSize = qs('editImageSize') ? qs('editImageSize').value : '';
+    if (modelId === GPT_IMAGE_15_EDIT_MODEL_ID) {
+      const imageSize = buildGptImageSizePayload('editImageSize', 'editImageWidth', 'editImageHeight', 'gptEditCustomSizeHint', modelId);
       if (imageSize) body.image_size = imageSize;
 
       const quality = qs('editQuality') ? qs('editQuality').value : '';
@@ -10862,6 +11234,32 @@ async function submitImageRequest(task) {
 
       const inputFidelity = qs('editInputFidelity') ? qs('editInputFidelity').value : '';
       if (inputFidelity) body.input_fidelity = inputFidelity;
+
+      const syncMode = qs('editSyncMode') ? qs('editSyncMode').value : 'false';
+      if (syncMode === 'true') body.sync_mode = true;
+
+      const maskSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.maskInput)[0] || uploadedMaskFile;
+      if (maskSource) {
+        const mu = await resolveUploadItemUrl(maskSource, 'mask', task);
+        if (mu) body.mask_image_url = mu;
+      }
+    }
+
+    if (modelId === GPT_IMAGE_2_EDIT_MODEL_ID) {
+      const imageSize = buildGptImageSizePayload('editImageSize', 'editImageWidth', 'editImageHeight', 'gptEditCustomSizeHint', modelId);
+      if (imageSize) body.image_size = imageSize;
+
+      const quality = qs('editQuality') ? qs('editQuality').value : '';
+      if (quality) body.quality = quality;
+
+      const syncMode = qs('editSyncMode') ? qs('editSyncMode').value : 'false';
+      if (syncMode === 'true') body.sync_mode = true;
+
+      const maskSource = getManagedUploadRemoteItems(MANAGED_UPLOADS.maskInput)[0] || uploadedMaskFile;
+      if (maskSource) {
+        const mu = await resolveUploadItemUrl(maskSource, 'mask', task);
+        if (mu) body.mask_url = mu;
+      }
     }
 
     // Nano Banana Pro Edit settings
@@ -11698,12 +12096,24 @@ function initInputs() {
   // Text model selector - update options when model changes
   const textModelSel = qs('imageModelText');
   if (textModelSel) textModelSel.addEventListener('change', updateTextModelOptions);
+  const gptTextSizeSel = qs('gptImageSize');
+  if (gptTextSizeSel) gptTextSizeSel.addEventListener('change', updateGptTextControls);
+  ['gptImageWidth', 'gptImageHeight'].forEach((id) => {
+    const el = qs(id);
+    if (el) el.addEventListener('change', () => syncGptImage2CustomSizeFields('gptImageWidth', 'gptImageHeight', 'gptTextCustomSizeHint', !!(qs('gptImageSize') && qs('gptImageSize').value === 'custom')));
+  });
 
   // Edit model selector - update options and re-clamp images when model changes
   const editModelSel = qs('imageModelEdit');
   if (editModelSel) editModelSel.addEventListener('change', () => {
     updateEditModelOptions();
     updateImagePreview(); // re-clamp if new limit is lower
+  });
+  const gptEditSizeSel = qs('editImageSize');
+  if (gptEditSizeSel) gptEditSizeSel.addEventListener('change', updateGptEditControls);
+  ['editImageWidth', 'editImageHeight'].forEach((id) => {
+    const el = qs(id);
+    if (el) el.addEventListener('change', () => syncGptImage2CustomSizeFields('editImageWidth', 'editImageHeight', 'gptEditCustomSizeHint', !!(qs('editImageSize') && qs('editImageSize').value === 'custom')));
   });
 
   // --- Download buttons (forceDownload) ---
@@ -12021,9 +12431,11 @@ async function wizIdbRestoreImages() {
 
 // ---- localStorage Persistence ----
 const APP_STATE_KEY = 'nano_app_state';
+const APP_STATE_VERSION = 2;
 
 const PERSISTED_SELECTS = [
   'imageModelText', 'imageModelEdit', 'editOutputFormat', 'editImageSize', 'editQuality',
+  'gptImageSize', 'gptQuality', 'gptBackground', 'gptSyncMode', 'editSyncMode',
   'editBackground', 'editInputFidelity', 'editNanoResolution', 'editNanoWebSearch', 'editNanoAspectRatio',
   'nano2Resolution', 'nano2SafetyTolerance', 'nano2WebSearch', 'nano2GoogleSearch',
   'editNano2Resolution', 'editNano2SafetyTolerance', 'editNano2WebSearch', 'editNano2GoogleSearch', 'editNano2AspectRatio',
@@ -12041,6 +12453,7 @@ const PERSISTED_SELECTS = [
   'toolsHeygenOutputLanguage',
   'aspectRatioBase',
   'toolsModel', 'toolsResolution', 'toolsAspectRatio', 'toolsWebSearch', 'toolsGoogleSearch',
+  'toolsGptImageSize', 'toolsGptQuality', 'toolsGptOutputFormat', 'toolsGptBackground', 'toolsGptFidelity',
   'toolsEnhancerModel', 'toolsEnhancerOutputFormat', 'toolsEnhancerSubjectDetection', 'toolsEnhancerCreativity', 'toolsEnhancerTexture',
   'toolsSamAudioModel', 'toolsSamAudioOutputFormat', 'toolsSamAudioAcceleration',
   'toolsBgOutputFormat', 'toolsBgSyncMode',
@@ -12053,7 +12466,8 @@ const PERSISTED_INPUTS = [
   'threeDRetextureStylePrompt',
   'kling3VoiceIds', 'kling3NegativePrompt', 'kling3VideoUrlInput',
   'nano2Seed', 'editNano2Seed',
-  'toolsTitleInput', 'toolsFontInput', 'toolsWishesInput', 'toolsSeed',
+  'gptImageWidth', 'gptImageHeight', 'editImageWidth', 'editImageHeight',
+  'toolsTitleInput', 'toolsFontInput', 'toolsWishesInput', 'toolsSeed', 'toolsGptImageWidth', 'toolsGptImageHeight',
   'toolsEnhancerUpscaleFactor', 'toolsEnhancerFaceStrength', 'toolsEnhancerFaceCreativity',
   'toolsEnhancerSharpen', 'toolsEnhancerDenoise', 'toolsEnhancerFixCompression',
   'toolsEnhancerStrength', 'toolsEnhancerDetail', 'toolsEnhancerPrompt',
@@ -12068,9 +12482,27 @@ const PERSISTED_CHECKBOXES = [
   'toolsHeygenTranslateAudioOnly', 'toolsHeygenEnableDynamicDuration',
 ];
 
+function applyCardStudioToolsDefaultsToState(state, options = {}) {
+  const force = !!(options && options.force);
+  const currentVersion = Number(state && state.version) || 0;
+  if (!force && currentVersion >= APP_STATE_VERSION) return false;
+  if (!state || typeof state !== 'object') return false;
+  if (!state.selects || typeof state.selects !== 'object') state.selects = {};
+  if (!state.inputs || typeof state.inputs !== 'object') state.inputs = {};
+  state.selects.toolsModel = DEFAULT_TOOLS_MODEL;
+  state.selects.toolsGptImageSize = GPT_IMAGE_2_TOOLS_DEFAULT_SIZE;
+  state.selects.toolsGptQuality = 'high';
+  state.selects.toolsGptOutputFormat = 'png';
+  state.inputs.toolsGptImageWidth = String(GPT_IMAGE_2_TOOLS_DEFAULT_WIDTH);
+  state.inputs.toolsGptImageHeight = String(GPT_IMAGE_2_TOOLS_DEFAULT_HEIGHT);
+  state.version = APP_STATE_VERSION;
+  return true;
+}
+
 function saveAppState() {
   try {
     const state = {
+      version: APP_STATE_VERSION,
       mode: currentMode,
       videoTab: currentVideoTab,
       kling3Family: currentKling3Family,
@@ -12120,6 +12552,12 @@ function restoreAppState() {
     if (!raw) return false;
     const state = JSON.parse(raw);
     if (!state || typeof state !== 'object') return false;
+    const migrated = applyCardStudioToolsDefaultsToState(state);
+    if (migrated) {
+      try {
+        localStorage.setItem(APP_STATE_KEY, JSON.stringify(state));
+      } catch (e) { /* ignore persistence errors */ }
+    }
 
     // Restore select values
     if (state.selects) {
