@@ -8276,6 +8276,95 @@ ${iconAndTypoBlock}
 ${qualityBlock}${imageRolesBlock}${bgStyleHarmonyBlock}${wishes ? `\n\n═══ USER REQUESTS ═══\n${wishes}` : ''}${textOverlays ? `\n\n═══ EXTRA TEXT TO RENDER (quoted content remains exact) ═══\n${textOverlays}` : ''}`;
 }
 
+function assembleWbCardPromptGptImage2(productImageCount) {
+  const formatImageRange = (start, count) => {
+    if (!count || count < 1) return '';
+    return count === 1 ? `Image ${start}` : `Images ${start}-${start + count - 1}`;
+  };
+  const quoteExact = (value) => JSON.stringify(String(value == null ? '' : value));
+  const title = (qs('toolsTitleInput') ? qs('toolsTitleInput').value.trim() : '') || 'Premium Quality';
+  const charItems = document.querySelectorAll('.tools-char-item');
+  const chars = [];
+  charItems.forEach(item => {
+    const input = item.querySelector('input[type="text"], textarea.wiz-char-input');
+    if (input && input.value.trim()) chars.push(input.value.trim());
+  });
+  const wishes = (qs('toolsWishesInput') ? qs('toolsWishesInput').value.trim() : '') || '';
+  const featureLines = chars.length > 0 ? chars : ['Natural materials', 'Premium quality', 'Guaranteed'];
+  const exactTitle = quoteExact(title);
+  const exactFeatureBlock = featureLines.map((c, index) => `${index + 1}. ${quoteExact(c)}`).join('\n');
+  const alwaysOnWildberriesGuideline = 'Creat product desighn profesional eye cating , for wildberis do serch how to do good cards for wildberis';
+  const textOverlays = skGetTextOverlaysForPrompt();
+  const inspoPresetCount = getInspoPresetSources().length;
+  const inspoUploadCount = uploadedInspoImages.length;
+  const totalInspoCount = inspoPresetCount + inspoUploadCount;
+  const fontPresetCount = getFontPresetSources().length;
+  const prodCount = productImageCount || 0;
+  const hasInspo = totalInspoCount > 0;
+  const hasFontPresetRefs = fontPresetCount > 0;
+  const fontRefStart = prodCount + 1;
+  const designRefStart = prodCount + fontPresetCount + 1;
+  const sections = [
+    'Create a professional Wildberries product card.',
+    '',
+    alwaysOnWildberriesGuideline,
+    '',
+    'Format: portrait 3:4.',
+    '',
+    'PRODUCT',
+    'Use the uploaded product image(s) as the source of truth for the product.',
+    'Keep the product exact: shape, color, material, texture, proportions, and overall appearance.',
+    '',
+    'TEXT TO RENDER EXACTLY',
+    'Headline:',
+    exactTitle,
+    '',
+    'Feature text:',
+    exactFeatureBlock,
+    '',
+    'ONLY USER-PROVIDED TEXT',
+    'Render only text explicitly provided by the user in this tool section.',
+    'Allowed text sources: the Headline, the Feature text, the EXTRA TEXT TO RENDER EXACTLY block, and any new text explicitly requested by the user in USER WISHES.',
+    'Do not copy, paraphrase, translate, infer, or borrow any text, letters, words, numbers, slogans, labels, or captions from typography references, design references, product images, or any other reference image.',
+  ];
+  if (hasFontPresetRefs) {
+    sections.push(
+      '',
+      'TYPOGRAPHY REFERENCES',
+      `${formatImageRange(fontRefStart, fontPresetCount)} are typography reference(s). Use them for the headline style.`
+    );
+  }
+  if (hasInspo) {
+    sections.push(
+      '',
+      'DESIGN REFERENCES',
+      `${formatImageRange(designRefStart, totalInspoCount)} are design reference(s).`,
+      'Use them for the card layout, composition, positioning, background style, palette, spacing, panels, framing, and overall visual direction.'
+    );
+  }
+  if (hasFontPresetRefs && hasInspo) {
+    sections.push(
+      '',
+      'REFERENCE PRIORITY',
+      'Product images control the product.',
+      'Typography references control the headline appearance.',
+      'Design references control the layout, placement, palette, and card structure.'
+    );
+  }
+  sections.push(
+    '',
+    'OUTPUT GOAL',
+    'Create a professional, eye-catching product design for Wildberries. Research how to design high-converting product cards for the platform.'
+  );
+  if (wishes) {
+    sections.push('', 'USER WISHES', wishes);
+  }
+  if (textOverlays) {
+    sections.push('', 'EXTRA TEXT TO RENDER EXACTLY', textOverlays);
+  }
+  return sections.join('\n');
+}
+
 async function submitToolsRequest(task) {
   if (task && task.toolsTool === 'enhancer') {
     const imageSource = getToolsUtilitySource();
@@ -11812,7 +11901,10 @@ async function handleGenerate() {
   let prompt;
   if (currentMode === 'tools') {
     if (currentToolsTool === 'card-studio') {
-      prompt = '/' + assembleWbCardPrompt(uploadedToolsImages.length);
+      const toolsModelId = qs('toolsModel') ? qs('toolsModel').value : DEFAULT_TOOLS_MODEL;
+      prompt = '/' + (toolsModelId === GPT_IMAGE_2_EDIT_MODEL_ID
+        ? assembleWbCardPromptGptImage2(uploadedToolsImages.length)
+        : assembleWbCardPrompt(uploadedToolsImages.length));
     } else if (currentToolsTool === 'enhancer') {
       const model = qs('toolsEnhancerModel') ? qs('toolsEnhancerModel').value : 'Standard V2';
       const factor = qs('toolsEnhancerUpscaleFactor') ? qs('toolsEnhancerUpscaleFactor').value : '2';
