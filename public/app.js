@@ -12258,6 +12258,37 @@ async function startTask(taskId) {
     else if (t.mode === 'kling3') res = await submitKling3Request(t);
     else res = await submitImageRequest(t);
 
+    if (res && res.completed && res.result) {
+      const isVideoMode = t.mode === 'video' || t.mode === 'kling3';
+      const urls = extractAllMediaUrls(res.result, isVideoMode ? 'video' : 'image');
+      if (!urls || urls.length === 0) throw new Error('No media URL in response');
+      t.status = 'COMPLETED';
+      t.completedAt = Date.now();
+      t.mediaUrl = urls[0];
+      t.allMediaUrls = urls;
+      t.savedToHistory = true;
+      const items = [];
+      for (let i = 0; i < urls.length; i++) {
+        const item = buildTaskHistoryItem(t, isVideoMode ? 'video' : 'image', urls[i], {
+          suffix: (isVideoMode ? 'video' : 'image') + '_' + i,
+          timestamp: t.completedAt + i,
+          outputIndex: i,
+        });
+        addToHistorySilent(item);
+        items.push(item);
+        if (isVideoMode) queueHistoryThumbnailForItem(item, i);
+      }
+      saveHistory();
+      scheduleHistoryUIUpdate();
+      queueAccountHistoryPersist(items);
+      setGalleryItems(items);
+      await cleanupTaskUploads(t);
+      saveTasks();
+      renderTasks();
+      showToast(window.I18N ? I18N.t('toast_complete') : 'Masterpiece ready!', 'info');
+      return;
+    }
+
     t.status = 'RUNNING';
     t.status_url = res.status_url;
     t.response_url = res.response_url || null;

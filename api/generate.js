@@ -3,6 +3,7 @@
 
 const { requireAuth } = require('../lib/_auth');
 const { uploadBufferToFal } = require('../lib/_fal_upload');
+const { generateGoogleImageFallback, getGoogleImageModelId, hasGoogleApiKey } = require('../lib/_google_fallback');
 
 const FAL_API_KEY = process.env.FAL_API_KEY || process.env.FAL_KEY;
 
@@ -166,7 +167,7 @@ module.exports = async function handler(req, res) {
         return;
     }
 
-    if (!FAL_API_KEY) {
+    if (!FAL_API_KEY && (!getGoogleImageModelId((req.body || {}).model_id || 'flux-pro-v1.1-ultra') || !hasGoogleApiKey())) {
         return res.status(500).json({ error: 'FAL_KEY environment variable not configured' });
     }
 
@@ -242,20 +243,32 @@ module.exports = async function handler(req, res) {
         // Submit to fal.ai
         const endpoint = model.endpoint;
 
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Key ${FAL_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-        });
+        let response = null;
+        if (FAL_API_KEY) {
+            response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Key ${FAL_API_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+        }
 
-        if (!response.ok) {
-            const errorText = await response.text();
+        if (!response || !response.ok) {
+            const errorText = response ? await response.text() : 'FAL_KEY environment variable not configured';
             console.error('FAL API Error:', errorText);
-            return res.status(response.status).json({
-                error: `FAL API error: ${response.statusText}`
+            const googleFallback = await generateGoogleImageFallback(model_id, payload).catch((fallbackError) => {
+                console.error('Google image fallback error:', fallbackError);
+                return { error: fallbackError.message || 'Google fallback failed' };
+            });
+            if (googleFallback && !googleFallback.error) {
+                return res.status(200).json(googleFallback);
+            }
+            return res.status(response ? response.status : 500).json({
+                error: googleFallback && googleFallback.error
+                    ? googleFallback.error
+                    : `FAL API error: ${response ? response.statusText : 'missing API key'}`
             });
         }
 

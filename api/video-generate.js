@@ -3,6 +3,7 @@
 
 const { requireAuth } = require('../lib/_auth');
 const { uploadBufferToFal } = require('../lib/_fal_upload');
+const { generateGoogleVideoFallback, getGoogleVideoModelId, hasGoogleApiKey } = require('../lib/_google_fallback');
 const FAL_API_KEY = process.env.FAL_API_KEY || process.env.FAL_KEY;
 
 // Option definitions with types, values, and defaults for UI rendering
@@ -2577,11 +2578,6 @@ module.exports = async function handler(req, res) {
         return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    // Check for API key
-    if (!FAL_API_KEY) {
-        return res.status(500).json({ error: 'FAL_KEY environment variable not configured' });
-    }
-
     try {
         const contentType = (req.headers['content-type'] || '').toLowerCase();
 
@@ -2708,6 +2704,10 @@ module.exports = async function handler(req, res) {
 
         if (!selectedModel) {
             return res.status(400).json({ error: 'Unknown model_id' });
+        }
+
+        if (!FAL_API_KEY && (!getGoogleVideoModelId(model_id) || !hasGoogleApiKey())) {
+            return res.status(500).json({ error: 'FAL_KEY environment variable not configured' });
         }
 
         // For Kling 3 models, either prompt or multi_prompt is required (except motion-control where prompt is optional)
@@ -3058,18 +3058,20 @@ module.exports = async function handler(req, res) {
             payload.elements = elementsForPayload;
         }
 
-        // Submit request to fal.ai
-        const response = await fetch(selectedModel.endpoint, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Key ${FAL_API_KEY}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(payload)
-        });
+        let response = null;
+        if (FAL_API_KEY) {
+            response = await fetch(selectedModel.endpoint, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Key ${FAL_API_KEY}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload)
+            });
+        }
 
-        if (!response.ok) {
-            const errorText = await response.text();
+        if (!response || !response.ok) {
+            const errorText = response ? await response.text() : 'FAL_KEY environment variable not configured';
             console.error('FAL API Error:', errorText);
             let parsed;
             try {
@@ -3080,10 +3082,18 @@ module.exports = async function handler(req, res) {
 
             const message = (parsed && (parsed.error || parsed.message))
                 ? (parsed.error || parsed.message)
-                : `FAL API error: ${response.status} ${response.statusText}`;
+                : `FAL API error: ${response ? response.status : 500} ${response ? response.statusText : 'missing API key'}`;
 
-            return res.status(response.status).json({
-                error: message,
+            const googleFallback = await generateGoogleVideoFallback(model_id, payload).catch((fallbackError) => {
+                console.error('Google video fallback error:', fallbackError);
+                return { error: fallbackError.message || 'Google fallback failed' };
+            });
+            if (googleFallback && !googleFallback.error) {
+                return res.status(200).json(googleFallback);
+            }
+
+            return res.status(response ? response.status : 500).json({
+                error: googleFallback && googleFallback.error ? googleFallback.error : message,
                 details: parsed || errorText,
             });
         }

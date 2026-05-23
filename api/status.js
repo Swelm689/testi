@@ -2,8 +2,10 @@
 // Proxies status requests to fal.ai to avoid CORS issues
 
 const { requireAuth } = require('../lib/_auth');
+const { hasGoogleApiKey, normalizeGoogleOperation } = require('../lib/_google_fallback');
 
 const FAL_API_KEY = process.env.FAL_API_KEY || process.env.FAL_KEY;
+const GOOGLE_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
 
 function extractDetailMessage(details) {
     if (!details) return '';
@@ -90,7 +92,9 @@ module.exports = async function handler(req, res) {
         return;
     }
 
-    if (!FAL_API_KEY) {
+    const rawStatusUrl = req.query && req.query.statusUrl ? String(req.query.statusUrl) : '';
+    const isGoogleStatusUrl = /^https:\/\/generativelanguage\.googleapis\.com\//i.test(rawStatusUrl);
+    if (!FAL_API_KEY && (!isGoogleStatusUrl || !hasGoogleApiKey())) {
         return res.status(500).json({ error: 'FAL_KEY environment variable not configured' });
     }
 
@@ -112,15 +116,25 @@ module.exports = async function handler(req, res) {
             return res.status(400).json({ error: 'statusUrl must be https' });
         }
 
-        const allowedHosts = new Set(['queue.fal.run']);
+        const allowedHosts = new Set(['queue.fal.run', 'generativelanguage.googleapis.com']);
         if (!allowedHosts.has(parsed.hostname)) {
             return res.status(400).json({ error: 'statusUrl host not allowed' });
         }
 
-        // Fetch status from fal.ai
+        const isGoogleRequest = parsed.hostname === 'generativelanguage.googleapis.com';
+        if (isGoogleRequest && !GOOGLE_API_KEY) {
+            return res.status(500).json({ error: 'GEMINI_API_KEY environment variable not configured' });
+        }
+        if (isGoogleRequest && !parsed.searchParams.has('key')) {
+            parsed.searchParams.set('key', GOOGLE_API_KEY);
+        }
+
+        // Fetch status from fal.ai or Google Gemini/Veo.
         const response = await fetch(parsed.toString(), {
             method: 'GET',
-            headers: {
+            headers: isGoogleRequest ? {
+                'Content-Type': 'application/json'
+            } : {
                 'Authorization': `Key ${FAL_API_KEY}`,
                 'Content-Type': 'application/json'
             }
@@ -149,7 +163,7 @@ module.exports = async function handler(req, res) {
         const data = await response.json();
 
         // Forward the response
-        return res.status(200).json(data);
+        return res.status(200).json(isGoogleRequest ? normalizeGoogleOperation(data) : data);
 
     } catch (error) {
         console.error('Status check error:', error);
