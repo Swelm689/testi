@@ -1,0 +1,3 @@
+Retrieving project…
+Error: Could not retrieve Project Settings. To link your Project, remove the `.vercel` directory and deploy again.
+Learn More: https://vercel.link/cannot-load-project-settings

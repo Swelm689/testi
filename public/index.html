@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
@@ -32,15 +32,6 @@
                         <i data-lucide="user"></i>
                         <span id="profileMenuLabel">Profile</span>
                     </button>
-                    <button class="profile-dropdown-item" onclick="switchAccountFromMenu(); toggleProfileMenu();" id="profileSwitchDropdown" style="display:none;">
-                        <i data-lucide="repeat-2"></i>
-                        <span id="profileSwitchLabel">Switch account</span>
-                    </button>
-                    <button class="profile-dropdown-item profile-dropdown-item-danger" onclick="signOutFromMenu(); toggleProfileMenu();" id="profileSignOutDropdown" style="display:none;">
-                        <i data-lucide="log-out"></i>
-                        <span id="profileMenuSignOutLabel">Sign out</span>
-                    </button>
-                    <div class="profile-dropdown-divider" id="profileDropdownDivider" aria-hidden="true" style="display:none;"></div>
                     <button class="profile-dropdown-item" onclick="toggleNews(); toggleProfileMenu();" id="newsToggleDropdown">
                         <i data-lucide="newspaper"></i>
                         <span data-i18n="news_title">News</span>
@@ -142,14 +133,20 @@
                                     </select>
                                 </div>
                             </div>
-                            <div class="settings-row" id="gptEditCustomSizeFields" style="display:none;">
-                                <div class="field">
-                                    <label>Width</label>
-                                    <input type="number" id="editImageWidth" min="256" max="3840" step="16" placeholder="1024">
+                            <div class="settings-row gpt-custom-size-fields" id="gptEditCustomSizeFields" style="display:none;">
+                                <div class="field gpt-size-slider-field">
+                                    <div class="gpt-size-slider-head">
+                                        <label for="editImageWidth">Width</label>
+                                        <input type="number" class="gpt-size-slider-value gpt-size-slider-value-input" id="editImageWidthValue" step="1" value="1024" aria-label="Width">
+                                    </div>
+                                    <input type="range" id="editImageWidth" min="1" max="4096" step="1" value="1024">
                                 </div>
-                                <div class="field">
-                                    <label>Height</label>
-                                    <input type="number" id="editImageHeight" min="256" max="3840" step="16" placeholder="1536">
+                                <div class="field gpt-size-slider-field">
+                                    <div class="gpt-size-slider-head">
+                                        <label for="editImageHeight">Height</label>
+                                        <input type="number" class="gpt-size-slider-value gpt-size-slider-value-input" id="editImageHeightValue" step="1" value="1536" aria-label="Height">
+                                    </div>
+                                    <input type="range" id="editImageHeight" min="1" max="4096" step="1" value="1536">
                                 </div>
                             </div>
                             <div class="edit-max-hint" id="gptEditCustomSizeHint" style="display:none;"></div>
@@ -561,47 +558,41 @@
 
                     <!-- Video Mode -->
                     <div id="videoUploadGroup" class="section-block" style="display: none;">
-                        <nav class="sub-tabs">
-                            <button class="sub-tab active" type="button" onclick="switchVideoTab('text-to-video')" id="vtab-text">
-                                <i data-lucide="type"></i> <span data-i18n="vtab_text">Text</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchVideoTab('image-to-video')" id="vtab-image">
-                                <i data-lucide="image"></i> <span data-i18n="vtab_image">Image</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchVideoTab('video-to-video')" id="vtab-video">
-                                <i data-lucide="film"></i> <span data-i18n="vtab_video">Video</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchVideoTab('reference-to-video')" id="vtab-reference">
-                                <i data-lucide="layers"></i> <span data-i18n="vtab_ref">Ref</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchVideoTab('audio-to-video')" id="vtab-audio">
-                                <i data-lucide="music"></i> <span data-i18n="vtab_audio">Audio</span>
-                            </button>
-                        </nav>
+                        <!-- Tier 1: Engine selector (segmented control) -->
+                        <div class="video-engine-bar" id="videoEngineBar" role="tablist" aria-label="Video engine"></div>
+
+                        <!-- Tier 2: Mode bar -->
+                        <div class="video-mode-bar" id="videoModeBar" role="tablist" aria-label="Mode"></div>
+
+                        <!-- Tier 3: Variant chips (populated by JS) -->
+                        <div class="video-variant-row" id="videoVariantRow" hidden></div>
+
+                        <!-- Sentinel: legacy IDs kept hidden so existing JS toggles still work. -->
+                        <div id="videoLegacyTabs" hidden aria-hidden="true">
+                            <button id="vtab-text" data-i18n="vtab_text">Text</button>
+                            <button id="vtab-image" data-i18n="vtab_image">Image</button>
+                            <button id="vtab-video" data-i18n="vtab_video">Video</button>
+                            <button id="vtab-reference" data-i18n="vtab_ref">Ref</button>
+                            <button id="vtab-audio" data-i18n="vtab_audio">Audio</button>
+                        </div>
                     </div>
 
                     <div id="seedance2UploadGroup" class="section-block" style="display: none;">
-                        <nav class="sub-tabs" id="seedance2FamilyTabs">
-                            <button class="sub-tab active" type="button" onclick="switchSeedance2Family('text-to-video')" id="seedance2family-text">
-                                <i data-lucide="type"></i> <span data-i18n="vtab_text">Text</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchSeedance2Family('image-to-video')" id="seedance2family-image">
-                                <i data-lucide="image"></i> <span data-i18n="vtab_image">Image</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchSeedance2Family('reference-to-video')" id="seedance2family-reference">
-                                <i data-lucide="layers"></i> <span data-i18n="vtab_ref">Ref</span>
-                            </button>
-                        </nav>
-
-                        <div class="settings-row" style="margin-top:0.75rem;">
-                            <div class="field" style="flex:2;">
-                                <label data-i18n="label_model">Model</label>
-                                <select id="seedance2Model"></select>
-                            </div>
+                        <!-- Legacy family-tabs sentinel (kept hidden; visible UI is in #videoModeBar) -->
+                        <div id="seedance2FamilyTabs" hidden aria-hidden="true">
+                            <button id="seedance2family-text"></button>
+                            <button id="seedance2family-image"></button>
+                            <button id="seedance2family-reference"></button>
                         </div>
 
-                        <nav class="sub-tabs" id="seedance2VariantTabs" style="margin-top:0.4rem;"></nav>
-                        <div class="video-family-note seedance2-model-note" id="seedance2ModelNote"></div>
+                        <!-- Hidden model select (kept for JS persistence; UI uses variant chips) -->
+                        <div hidden style="display:none">
+                            <select id="seedance2Model"></select>
+                        </div>
+
+                        <!-- Hidden variant tabs sentinel (variant chips are now in #videoVariantRow) -->
+                        <div id="seedance2VariantTabs" hidden aria-hidden="true"></div>
+                        <div class="video-family-note seedance2-model-note" id="seedance2ModelNote" hidden></div>
 
                         <div id="seedance2ReferenceGroup" class="seedance2-reference-group" style="display:none;">
                             <div class="seedance2-reference-tip" id="seedance2ReferenceTip" data-i18n="seedance2_reference_tip">
@@ -638,77 +629,47 @@
                     </div>
 
                     <div id="ltx23UploadGroup" class="section-block" style="display: none;">
-                        <nav class="sub-tabs" id="ltx23FamilyTabs">
-                            <button class="sub-tab active" type="button" onclick="switchLtx23Family('text-to-video')" id="ltx23family-text">
-                                <i data-lucide="type"></i> <span data-i18n="vtab_text">Text</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchLtx23Family('image-to-video')" id="ltx23family-image">
-                                <i data-lucide="image"></i> <span data-i18n="vtab_image">Image</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchLtx23Family('video-to-video')" id="ltx23family-video">
-                                <i data-lucide="film"></i> <span data-i18n="vtab_video">Video</span>
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchLtx23Family('audio-to-video')" id="ltx23family-audio">
-                                <i data-lucide="music"></i> <span data-i18n="vtab_audio">Audio</span>
-                            </button>
-                        </nav>
-
-                        <div class="settings-row" style="margin-top:0.75rem;">
-                            <div class="field" style="flex:2;">
-                                <label data-i18n="label_model">Model</label>
-                                <select id="ltx23Model"></select>
-                            </div>
+                        <!-- Legacy family-tabs sentinel -->
+                        <div id="ltx23FamilyTabs" hidden aria-hidden="true">
+                            <button id="ltx23family-text"></button>
+                            <button id="ltx23family-image"></button>
+                            <button id="ltx23family-video"></button>
+                            <button id="ltx23family-audio"></button>
                         </div>
 
-                        <nav class="sub-tabs" id="ltx23VariantTabs" style="margin-top:0.4rem;"></nav>
+                        <!-- Hidden model select (UI uses variant chips) -->
+                        <div hidden style="display:none">
+                            <select id="ltx23Model"></select>
+                        </div>
+
+                        <!-- Hidden variant tabs sentinel -->
+                        <div id="ltx23VariantTabs" hidden aria-hidden="true"></div>
                     </div>
 
                     <!-- Kling 3 controls are embedded into Video via public/app.js -->
                     <div id="kling3UploadGroup" class="section-block" style="display: none;">
-                        <nav class="sub-tabs" id="kling3FamilyTabs">
-                            <button class="sub-tab active" type="button" onclick="switchKling3Family('v3')" id="k3family-v3">
-                                <i data-lucide="sparkles"></i> V3
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchKling3Family('o3')" id="k3family-o3">
-                                <i data-lucide="layers"></i> O3
-                            </button>
-                        </nav>
-
-                        <nav class="sub-tabs" id="kling3ModeTabsV3" style="margin-top:0.4rem;">
-                            <button class="sub-tab active" type="button" onclick="switchKling3Tab('v3-text-to-video')" id="k3tab-v3-text">
-                                <i data-lucide="type"></i> V3 Text
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchKling3Tab('v3-image-to-video')" id="k3tab-v3-image">
-                                <i data-lucide="image"></i> V3 Image
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchKling3Tab('v3-motion-control')" id="k3tab-v3-motion">
-                                <i data-lucide="person-standing"></i> V3 Motion
-                            </button>
-                        </nav>
-
-                        <nav class="sub-tabs" id="kling3ModeTabsO3" style="margin-top:0.4rem; display:none;">
-                            <button class="sub-tab" type="button" onclick="switchKling3Tab('o3-text-to-video')" id="k3tab-o3-text">
-                                <i data-lucide="type"></i> O3 Text
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchKling3Tab('o3-image-to-video')" id="k3tab-o3-image">
-                                <i data-lucide="image"></i> O3 Image
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchKling3Tab('o3-reference-to-video')" id="k3tab-o3-ref">
-                                <i data-lucide="layers"></i> O3 Ref
-                            </button>
-                            <button class="sub-tab" type="button" onclick="switchKling3Tab('o3-video-to-video')" id="k3tab-o3-v2v">
-                                <i data-lucide="film"></i> O3 V2V
-                            </button>
-                        </nav>
+                        <!-- Legacy Kling family/mode buttons (hidden; visible UI is in #videoEngineBar / #videoModeBar / #videoVariantRow) -->
+                        <div id="kling3FamilyTabs" hidden aria-hidden="true">
+                            <button id="k3family-v3"></button>
+                            <button id="k3family-o3"></button>
+                        </div>
+                        <div id="kling3ModeTabsV3" hidden aria-hidden="true">
+                            <button id="k3tab-v3-text"></button>
+                            <button id="k3tab-v3-image"></button>
+                            <button id="k3tab-v3-motion"></button>
+                        </div>
+                        <div id="kling3ModeTabsO3" hidden aria-hidden="true">
+                            <button id="k3tab-o3-text"></button>
+                            <button id="k3tab-o3-image"></button>
+                            <button id="k3tab-o3-ref"></button>
+                            <button id="k3tab-o3-v2v"></button>
+                        </div>
 
                         <!-- Kling 3 Controls -->
                         <div id="kling3Controls">
-                            <!-- Model selector -->
-                            <div class="settings-row" style="margin-top:0.75rem;">
-                                <div class="field" style="flex:2;">
-                                    <label>Model</label>
-                                    <select id="kling3Model"></select>
-                                </div>
+                            <!-- Hidden Kling model select (UI uses variant chips in #videoVariantRow) -->
+                            <div hidden style="display:none">
+                                <select id="kling3Model"></select>
                             </div>
 
                             <!-- Start Image Upload (for I2V modes) -->
@@ -883,7 +844,6 @@
                             </div>
                         </div>
                     </div>
-
 
                     <!-- Tools Mode -->
                     <div id="toolsSection" class="section-block" style="display: none;">
@@ -1145,16 +1105,22 @@
                                             </select>
                                         </div>
                                     </div>
-                                    <div class="settings-grid" id="toolsGptCustomSizeFields" style="display:none;margin-top:0.5rem;">
-                                        <div class="field">
-                                            <label>Width</label>
-                                            <input type="number" id="toolsGptImageWidth" min="256" max="3840" step="16" placeholder="1536">
-                                        </div>
-                                        <div class="field">
-                                            <label>Height</label>
-                                            <input type="number" id="toolsGptImageHeight" min="256" max="3840" step="16" placeholder="2048">
-                                        </div>
+                                    <div class="settings-grid gpt-custom-size-fields" id="toolsGptCustomSizeFields" style="display:none;margin-top:0.5rem;">
+                                <div class="field gpt-size-slider-field">
+                                    <div class="gpt-size-slider-head">
+                                        <label for="toolsGptImageWidth">Width</label>
+                                        <input type="number" class="gpt-size-slider-value gpt-size-slider-value-input" id="toolsGptImageWidthValue" step="1" value="1200" aria-label="Width">
                                     </div>
+                                    <input type="range" id="toolsGptImageWidth" min="1" max="4096" step="1" value="1200">
+                                </div>
+                                <div class="field gpt-size-slider-field">
+                                    <div class="gpt-size-slider-head">
+                                        <label for="toolsGptImageHeight">Height</label>
+                                        <input type="number" class="gpt-size-slider-value gpt-size-slider-value-input" id="toolsGptImageHeightValue" step="1" value="1600" aria-label="Height">
+                                    </div>
+                                    <input type="range" id="toolsGptImageHeight" min="1" max="4096" step="1" value="1600">
+                                </div>
+                            </div>
                                     <div class="edit-max-hint" id="toolsGptCustomSizeHint" style="display:none;margin-top:0.35rem;"></div>
                                 </details>
                             </div>
@@ -1552,16 +1518,22 @@
                                 </select>
                             </div>
                         </div>
-                        <div class="settings-grid" id="gptTextCustomSizeFields" style="display:none;">
-                            <div class="field">
-                                <label>Width</label>
-                                <input type="number" id="gptImageWidth" min="256" max="3840" step="16" placeholder="1536">
+                        <div class="settings-grid gpt-custom-size-fields" id="gptTextCustomSizeFields" style="display:none;">
+                                <div class="field gpt-size-slider-field">
+                                    <div class="gpt-size-slider-head">
+                                        <label for="gptImageWidth">Width</label>
+                                        <input type="number" class="gpt-size-slider-value gpt-size-slider-value-input" id="gptImageWidthValue" step="1" value="1536" aria-label="Width">
+                                    </div>
+                                    <input type="range" id="gptImageWidth" min="1" max="4096" step="1" value="1536">
+                                </div>
+                                <div class="field gpt-size-slider-field">
+                                    <div class="gpt-size-slider-head">
+                                        <label for="gptImageHeight">Height</label>
+                                        <input type="number" class="gpt-size-slider-value gpt-size-slider-value-input" id="gptImageHeightValue" step="1" value="2048" aria-label="Height">
+                                    </div>
+                                    <input type="range" id="gptImageHeight" min="1" max="4096" step="1" value="2048">
+                                </div>
                             </div>
-                            <div class="field">
-                                <label>Height</label>
-                                <input type="number" id="gptImageHeight" min="256" max="3840" step="16" placeholder="2048">
-                            </div>
-                        </div>
                         <div class="edit-max-hint" id="gptTextCustomSizeHint" style="display:none;"></div>
                         <!-- Nano Banana Pro specific options -->
                         <div class="settings-grid" id="nanoBananaOptions" style="display:none;">
@@ -1801,52 +1773,6 @@
         </div>
     </div>
 
-    <div id="authGate" class="auth-gate">
-        <div class="auth-gate-bg">
-            <div class="auth-gate-orb auth-gate-orb--1"></div>
-            <div class="auth-gate-orb auth-gate-orb--2"></div>
-            <div class="auth-gate-orb auth-gate-orb--3"></div>
-        </div>
-        <div class="auth-shell">
-            <div class="auth-panel">
-                <div class="auth-copy">
-                    <span class="auth-kicker" id="authKicker">Private Studio</span>
-                    <h1 class="auth-title" id="authTitle">Continue with Google</h1>
-                    <p class="auth-body" id="authBody">Sign in once to open your account, keep your history, and sync your presets.</p>
-                    <div class="auth-loader" id="authLoader" aria-hidden="true">
-                        <span class="auth-loader-ring"></span>
-                        <span class="auth-loader-core"></span>
-                    </div>
-                    <div class="auth-status" id="authStatus">Checking your session…</div>
-                    <button id="authGoogleBtn" class="auth-google-btn" type="button">
-                        <svg class="auth-google-icon" viewBox="0 0 24 24" width="20" height="20"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
-                        <span id="authGoogleBtnLabel">Continue with Google</span>
-                    </button>
-                </div>
-                <div class="auth-aside">
-                    <span class="auth-aside-label" id="authAsideLabel">What your account keeps</span>
-                    <ul class="auth-aside-list">
-                        <li id="authBenefitHistory"><i data-lucide="clock"></i> Generation history per account</li>
-                        <li id="authBenefitPresets"><i data-lucide="sliders-horizontal"></i> Title and characteristic presets</li>
-                        <li id="authBenefitInspiration"><i data-lucide="palette"></i> Design inspiration presets and images</li>
-                    </ul>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div id="migrationModal" class="migration-modal" style="display:none;">
-        <div class="migration-card">
-            <span class="migration-pill" id="migrationPill">Existing local data found</span>
-            <h2 class="migration-title" id="migrationTitle">Register to keep your current history</h2>
-            <p class="migration-body" id="migrationBody">The first Google account you use here will receive the history and presets currently stored in this browser. After migration, they will be removed from local storage so another account cannot inherit them.</p>
-            <button id="migrationContinueBtn" class="auth-google-btn migration-google-btn" type="button">
-                <svg class="auth-google-icon" viewBox="0 0 24 24" width="20" height="20"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
-                <span id="migrationContinueLabel">Continue with Google</span>
-            </button>
-        </div>
-    </div>
-
     <section id="profilePage" class="profile-screen" style="display:none;">
         <div class="profile-screen-shell">
             <header class="profile-screen-header">
@@ -1858,10 +1784,6 @@
                     <span class="profile-screen-kicker" id="profileKicker">Account</span>
                     <h2 class="profile-screen-title" id="profilePageTitle">Profile</h2>
                 </div>
-                <button id="profileSignOutBtn" class="profile-signout-btn" type="button">
-                    <i data-lucide="log-out"></i>
-                    <span id="profileSignOutLabel">Sign out</span>
-                </button>
             </header>
             <div class="profile-screen-grid">
                 <section class="profile-card profile-card--hero">

@@ -365,6 +365,47 @@ const OPTION_DEFS = {
         "default": "720p",
         "label": "Resolution"
     },
+    "aspect_ratio_happy_horse": {
+        "type": "select",
+        "values": [
+            "16:9",
+            "9:16",
+            "1:1",
+            "4:3",
+            "3:4"
+        ],
+        "default": "16:9",
+        "label": "Aspect Ratio"
+    },
+    "resolution_happy_horse": {
+        "type": "select",
+        "values": [
+            "720p",
+            "1080p"
+        ],
+        "default": "1080p",
+        "label": "Resolution"
+    },
+    "duration_happy_horse": {
+        "type": "select",
+        "values": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15
+        ],
+        "default": 5,
+        "label": "Duration (sec)"
+    },
     "camera_fixed": {
         "type": "bool",
         "default": false,
@@ -1273,6 +1314,9 @@ const OPTION_KEY_ALIASES = {
     "resolution_seedance": "resolution",
     "resolution_seedance2_fast": "resolution",
     "resolution_seedance2_pro": "resolution",
+    "aspect_ratio_happy_horse": "aspect_ratio",
+    "resolution_happy_horse": "resolution",
+    "duration_happy_horse": "duration",
     "aspect_ratio_sora": "aspect_ratio",
     "aspect_ratio_sora_i2v": "aspect_ratio",
     "resolution_sora": "resolution",
@@ -1403,6 +1447,7 @@ const VIDEO_SELECTOR_RANKS = {
     "seedance-2.0-fast-ref2v": 402,
     "seedance-2.0-pro-ref2v": 403,
     "kling-o1-reference-to-video": 404,
+    "happy-horse-ref2v": 405,
 
     "ltx-2.3-a2v": 451,
 
@@ -2182,6 +2227,23 @@ const VIDEO_MODELS = {
             "duration_kling_o1"
         ]
     },
+    "happy-horse-ref2v": {
+        "label": "Happy Horse (Reference to Video)",
+        "endpoint": "https://queue.fal.run/alibaba/happy-horse/reference-to-video",
+        "kind": "reference-to-video",
+        "requiresImage": false,
+        "maxImageUrls": 9,
+        "allowedOptions": [
+            "aspect_ratio_happy_horse",
+            "resolution_happy_horse",
+            "duration_happy_horse",
+            "enable_safety_checker",
+            "seed"
+        ],
+        "optionTypes": {
+            "duration_happy_horse": "number"
+        }
+    },
     "veo3.1-reference-to-video": {
         "label": "Veo 3.1 (Reference to Video)",
         "endpoint": "https://queue.fal.run/fal-ai/veo3.1/reference-to-video",
@@ -2778,8 +2840,13 @@ module.exports = async function handler(req, res) {
                 return res.status(400).json({ error: 'Maximum 4 reference images allowed' });
             }
 
-            if (selectedModel.kind === 'reference-to-video' && uploadedImageUrls.length > 7) {
-                return res.status(400).json({ error: 'Maximum 7 images allowed for this model' });
+            if (selectedModel.kind === 'reference-to-video' && !isSeedanceReferenceModel) {
+                const maxRefImages = Number.isFinite(Number(selectedModel.maxImageUrls))
+                    ? Number(selectedModel.maxImageUrls)
+                    : 7;
+                if (uploadedImageUrls.length > maxRefImages) {
+                    return res.status(400).json({ error: `Maximum ${maxRefImages} images allowed for this model` });
+                }
             }
 
             if (Array.isArray(elements) && elements.length > 0) {
@@ -2791,10 +2858,13 @@ module.exports = async function handler(req, res) {
                 }
 
                 if (selectedModel.kind === 'reference-to-video') {
-                    // Kling O1 reference-to-video: max 7 total (elements + reference images + start image)
-                    // We cannot reliably detect which image is start vs reference here, so enforce elements + image_urls <= 7.
-                    if (elements.length + uploadedImageUrls.length > 7) {
-                        return res.status(400).json({ error: 'Maximum 7 total (elements + images) allowed for this model' });
+                    // Kling O1 reference-to-video: max 7 total (elements + reference images + start image).
+                    // We cannot reliably detect which image is start vs reference here, so enforce elements + image_urls <= maxRefImages.
+                    const maxRefImagesTotal = Number.isFinite(Number(selectedModel.maxImageUrls))
+                        ? Number(selectedModel.maxImageUrls)
+                        : 7;
+                    if (elements.length + uploadedImageUrls.length > maxRefImagesTotal) {
+                        return res.status(400).json({ error: `Maximum ${maxRefImagesTotal} total (elements + images) allowed for this model` });
                     }
                 }
             }

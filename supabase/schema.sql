@@ -13,7 +13,7 @@ create table if not exists public.profiles (
 create table if not exists public.history_items (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  type text not null check (type in ('image','video','3d')),
+  type text not null check (type in ('image','video','audio','3d')),
   prompt text,
   created_at timestamptz not null default now(),
   media_path text,
@@ -21,6 +21,20 @@ create table if not exists public.history_items (
   meta_json jsonb not null default '{}'::jsonb
 );
 create index if not exists history_items_user_created_idx on public.history_items(user_id, created_at desc);
+do $$
+begin
+  if exists (
+    select 1
+    from information_schema.table_constraints
+    where constraint_schema = 'public'
+      and table_name = 'history_items'
+      and constraint_name = 'history_items_type_check'
+  ) then
+    alter table public.history_items drop constraint history_items_type_check;
+  end if;
+  alter table public.history_items
+    add constraint history_items_type_check check (type in ('image','video','audio','3d'));
+end $$;
 
 create table if not exists public.text_preset_overrides (
   id uuid primary key default gen_random_uuid(),

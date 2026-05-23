@@ -1,4 +1,5 @@
 .vercel
+.vercel-cli-global
 .env*.local
 
 node_modules/

@@ -1,0 +1,109 @@
+ INFO  Accepting connections at http://localhost:3000
+ HTTP  02.05.2026 19:27:05 127.0.0.1 GET /
+ HTTP  02.05.2026 19:27:05 127.0.0.1 Returned 200 in 112 ms
+ HTTP  02.05.2026 19:27:22 127.0.0.1 GET /public/
+ HTTP  02.05.2026 19:27:22 127.0.0.1 Returned 200 in 8 ms
+ HTTP  02.05.2026 19:27:22 127.0.0.1 GET /public/app.js
+ HTTP  02.05.2026 19:27:22 127.0.0.1 Returned 200 in 7 ms
+ HTTP  02.05.2026 19:28:23 127.0.0.1 GET /public/
+ HTTP  02.05.2026 19:28:23 127.0.0.1 Returned 200 in 13 ms
+ HTTP  02.05.2026 19:28:23 127.0.0.1 GET /public/index.css
+ HTTP  02.05.2026 19:28:23 127.0.0.1 GET /public/translations.js
+ HTTP  02.05.2026 19:28:23 127.0.0.1 GET /public/i18n.js
+ HTTP  02.05.2026 19:28:23 127.0.0.1 GET /public/app.js
+ HTTP  02.05.2026 19:28:23 127.0.0.1 GET /public/account.js
+ HTTP  02.05.2026 19:28:23 127.0.0.1 Returned 200 in 12 ms
+ HTTP  02.05.2026 19:28:23 127.0.0.1 Returned 200 in 22 ms
+ HTTP  02.05.2026 19:28:23 127.0.0.1 Returned 200 in 19 ms
+ HTTP  02.05.2026 19:28:23 127.0.0.1 Returned 200 in 37 ms
+ HTTP  02.05.2026 19:28:23 127.0.0.1 Returned 200 in 34 ms
+ HTTP  02.05.2026 19:30:08 127.0.0.1 GET /public/
+ HTTP  02.05.2026 19:30:08 127.0.0.1 Returned 200 in 4 ms
+ HTTP  02.05.2026 19:30:09 127.0.0.1 GET /public/
+ HTTP  02.05.2026 19:30:09 127.0.0.1 Returned 200 in 3 ms
+ HTTP  02.05.2026 19:30:09 127.0.0.1 GET /public/index.css
+ HTTP  02.05.2026 19:30:09 127.0.0.1 Returned 200 in 3 ms
+ HTTP  02.05.2026 19:30:09 127.0.0.1 GET /public/translations.js
+ HTTP  02.05.2026 19:30:09 127.0.0.1 GET /public/i18n.js
+ HTTP  02.05.2026 19:30:09 127.0.0.1 Returned 200 in 11 ms
+ HTTP  02.05.2026 19:30:09 127.0.0.1 GET /public/app.js
+ HTTP  02.05.2026 19:30:09 127.0.0.1 GET /public/account.js
+ HTTP  02.05.2026 19:30:09 127.0.0.1 Returned 200 in 19 ms
+ HTTP  02.05.2026 19:30:09 127.0.0.1 Returned 200 in 4 ms
+ HTTP  02.05.2026 19:30:09 127.0.0.1 Returned 200 in 33 ms
+ HTTP  02.05.2026 19:37:10 127.0.0.1 GET /public/
+ HTTP  02.05.2026 19:37:10 127.0.0.1 Returned 200 in 3 ms
+ HTTP  02.05.2026 19:37:11 127.0.0.1 GET /public/
+ HTTP  02.05.2026 19:37:11 127.0.0.1 Returned 200 in 2 ms
+ HTTP  02.05.2026 19:37:11 127.0.0.1 GET /public/index.css
+ HTTP  02.05.2026 19:37:11 127.0.0.1 Returned 200 in 3 ms
+ HTTP  02.05.2026 19:37:11 127.0.0.1 GET /public/translations.js
+ HTTP  02.05.2026 19:37:11 127.0.0.1 GET /public/i18n.js
+ HTTP  02.05.2026 19:37:11 127.0.0.1 GET /public/app.js
+ HTTP  02.05.2026 19:37:11 127.0.0.1 GET /public/account.js
+ HTTP  02.05.2026 19:37:11 127.0.0.1 Returned 200 in 6 ms
+ HTTP  02.05.2026 19:37:11 127.0.0.1 Returned 200 in 6 ms
+ HTTP  02.05.2026 19:37:11 127.0.0.1 Returned 200 in 6 ms
+ HTTP  02.05.2026 19:37:11 127.0.0.1 Returned 200 in 19 ms
+ HTTP  02.05.2026 19:42:49 127.0.0.1 GET /public/
+ HTTP  02.05.2026 19:42:49 127.0.0.1 Returned 200 in 5 ms
+ HTTP  03.05.2026 15:39:22 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:22 ::1 Returned 404 in 31 ms
+ HTTP  03.05.2026 15:39:23 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:23 ::1 Returned 404 in 5 ms
+ HTTP  03.05.2026 15:39:24 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:24 ::1 Returned 404 in 6 ms
+ HTTP  03.05.2026 15:39:24 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:24 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:25 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:25 ::1 Returned 404 in 3 ms
+ HTTP  03.05.2026 15:39:25 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:25 ::1 Returned 404 in 5 ms
+ HTTP  03.05.2026 15:39:26 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:26 ::1 Returned 404 in 2 ms
+ HTTP  03.05.2026 15:39:26 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:26 ::1 Returned 404 in 2 ms
+ HTTP  03.05.2026 15:39:27 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:27 ::1 Returned 404 in 1 ms
+ HTTP  03.05.2026 15:39:27 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:27 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:28 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:28 ::1 Returned 404 in 3 ms
+ HTTP  03.05.2026 15:39:28 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:28 ::1 Returned 404 in 2 ms
+ HTTP  03.05.2026 15:39:29 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:29 ::1 Returned 404 in 3 ms
+ HTTP  03.05.2026 15:39:29 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:29 ::1 Returned 404 in 2 ms
+ HTTP  03.05.2026 15:39:30 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:30 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:30 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:30 ::1 Returned 404 in 3 ms
+ HTTP  03.05.2026 15:39:31 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:31 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:31 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:31 ::1 Returned 404 in 3 ms
+ HTTP  03.05.2026 15:39:32 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:32 ::1 Returned 404 in 5 ms
+ HTTP  03.05.2026 15:39:32 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:32 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:33 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:33 ::1 Returned 404 in 3 ms
+ HTTP  03.05.2026 15:39:33 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:33 ::1 Returned 404 in 5 ms
+ HTTP  03.05.2026 15:39:34 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:34 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:34 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:34 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:35 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:35 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:35 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:35 ::1 Returned 404 in 2 ms
+ HTTP  03.05.2026 15:39:36 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:36 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:36 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:36 ::1 Returned 404 in 4 ms
+ HTTP  03.05.2026 15:39:37 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:37 ::1 Returned 404 in 2 ms
+ HTTP  03.05.2026 15:39:37 ::1 GET /latest.yml
+ HTTP  03.05.2026 15:39:37 ::1 Returned 404 in 3 ms

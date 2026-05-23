@@ -154,6 +154,8 @@ function getHistoryIdentityKey(item, fallbackIndex = 0) {
 
 const LOCAL_HISTORY_CACHE_LIMIT = 120;
 const LOCAL_HISTORY_INLINE_THUMB_MAX_LENGTH = 18000;
+const ACCOUNT_HISTORY_SYNC_STRING_LIMIT = 8192;
+const ACCOUNT_HISTORY_SYNC_INLINE_DATA_LIMIT = 4096;
 
 function normalizeHistoryItemForRuntime(item) {
   if (!item || typeof item !== 'object') return item;
@@ -308,9 +310,10 @@ function canGenerateClientHistoryThumbnail(item) {
   return item.type === 'video' || item.type === 'image';
 }
 
-// Account history/tasks are loaded after the signed-in scope is known.
-let history = [];
-let tasks = [];
+// Start from local storage immediately so refresh never boots with an empty
+// in-memory cache before the local account bridge finishes initializing.
+let history = loadStoredArray('nano_history');
+let tasks = loadStoredArray('nano_tasks');
 const HISTORY_FILTERS = [
   { id: 'all', types: null },
   { id: 'image', types: ['image'] },
@@ -2557,25 +2560,17 @@ async function editCurrentImage() {
   // 1. Switch to Edit tab
   switchMode('image');
 
-  // 2. Set model to Nano Banana 2 edit
+  // 2. Set model to GPT Image 2 edit
   const modelSel = qs('imageModelEdit');
   if (modelSel) {
-    modelSel.value = 'nano-banana-2/edit';
+    modelSel.value = GPT_IMAGE_2_EDIT_MODEL_ID;
     modelSel.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   // 3. Wait for DOM to settle
   await new Promise(r => setTimeout(r, 180));
 
-  // 4. Apply preset settings: 4K, web search on, google search on
-  const resSel = qs('editNano2Resolution');
-  if (resSel) resSel.value = '4K';
-  const webSel = qs('editNano2WebSearch');
-  if (webSel) webSel.value = 'true';
-  const googleSel = qs('editNano2GoogleSearch');
-  if (googleSel) googleSel.value = 'true';
-
-  // 5. Fetch image and inject into imageInput
+  // 4. Fetch image, apply source-aware GPT size, and inject into imageInput
   try {
     showToast(window.I18N ? I18N.t('toast_setting_asset') : 'Setting image…');
     const resp = await fetch(url);
@@ -2584,6 +2579,31 @@ async function editCurrentImage() {
     let filename = 'edit-source.png';
     try { filename = new URL(url).pathname.split('/').pop() || filename; } catch(_) {}
     const file = new File([blob], filename, { type: blob.type || 'image/png' });
+
+    let sourceWidth = null;
+    let sourceHeight = null;
+    try {
+      const decoded = await decodeImageForUpload(file);
+      sourceWidth = decoded && decoded.width ? decoded.width : null;
+      sourceHeight = decoded && decoded.height ? decoded.height : null;
+      if (decoded && typeof decoded.cleanup === 'function') decoded.cleanup();
+    } catch (_) {
+      // If dimension detection fails, GPT Image 2 edit falls back to its current size setting.
+    }
+
+    const editSizeSel = qs('editImageSize');
+    const widthEl = qs('editImageWidth');
+    const heightEl = qs('editImageHeight');
+    const widthValueEl = qs('editImageWidthValue');
+    const heightValueEl = qs('editImageHeightValue');
+    if (editSizeSel && widthEl && heightEl && sourceWidth && sourceHeight) {
+      editSizeSel.value = 'custom';
+      widthEl.value = String(sourceWidth);
+      heightEl.value = String(sourceHeight);
+      if (widthValueEl) widthValueEl.value = String(sourceWidth);
+      if (heightValueEl) heightValueEl.value = String(sourceHeight);
+      updateGptEditControls();
+    }
 
     const inputEl = qs('imageInput');
     if (!inputEl) { showToast(window.I18N ? I18N.t('toast_input_not_found') : 'Input not found', 'error'); return; }
@@ -3076,6 +3096,74 @@ function compactHistoryItemForStorage(item) {
   return copy;
 }
 
+function compactHistoryValueForAccountSync(value, depth = 0) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    if (/^blob:/i.test(trimmed)) return null;
+    if (/^data:/i.test(trimmed) && trimmed.length > ACCOUNT_HISTORY_SYNC_INLINE_DATA_LIMIT) return null;
+    if (trimmed.length > ACCOUNT_HISTORY_SYNC_STRING_LIMIT) return trimmed.slice(0, ACCOUNT_HISTORY_SYNC_STRING_LIMIT);
+    return trimmed;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (depth >= 4) return null;
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 40)
+      .map((entry) => compactHistoryValueForAccountSync(entry, depth + 1))
+      .filter((entry) => entry !== null && entry !== undefined);
+  }
+  if (typeof value === 'object') {
+    const next = {};
+    Object.entries(value).forEach(([key, entry]) => {
+      if (key.startsWith('__')) return;
+      const compacted = compactHistoryValueForAccountSync(entry, depth + 1);
+      if (compacted !== null && compacted !== undefined && compacted !== '') next[key] = compacted;
+    });
+    return next;
+  }
+  return null;
+}
+
+function compactHistoryItemForAccountSync(item) {
+  if (!item || typeof item !== 'object') return null;
+  const normalized = normalizeHistoryItemForRuntime({
+    ...item,
+    meta: item.meta && typeof item.meta === 'object' ? { ...item.meta } : item.meta,
+    genCtx: item.genCtx && typeof item.genCtx === 'object' ? { ...item.genCtx } : item.genCtx,
+  });
+  const compact = {
+    id: normalized.id || null,
+    type: normalized.type || 'image',
+    prompt: normalized.prompt || '',
+    timestamp: normalized.timestamp || Date.now(),
+    url: compactHistoryValueForAccountSync(normalized.url),
+    thumbnailUrl: compactHistoryValueForAccountSync(normalized.thumbnailUrl),
+    modelDownloadUrl: compactHistoryValueForAccountSync(normalized.modelDownloadUrl),
+    residualUrl: compactHistoryValueForAccountSync(normalized.residualUrl),
+    duration: Number.isFinite(Number(normalized.duration)) ? Number(normalized.duration) : null,
+    sampleRate: Number.isFinite(Number(normalized.sampleRate)) ? Number(normalized.sampleRate) : null,
+    modelFormat: compactHistoryValueForAccountSync(normalized.modelFormat),
+    model_urls: compactHistoryValueForAccountSync(normalized.model_urls),
+    glbUrl: compactHistoryValueForAccountSync(normalized.glbUrl),
+    outputFormat: compactHistoryValueForAccountSync(normalized.outputFormat),
+    genCtx: compactHistoryValueForAccountSync(normalized.genCtx),
+    meta: compactHistoryValueForAccountSync(normalized.meta),
+  };
+  if (compact.thumbnailUrl && compact.thumbnailUrl === compact.url) delete compact.thumbnailUrl;
+  if (!compact.modelDownloadUrl && compact.glbUrl) compact.modelDownloadUrl = compact.glbUrl;
+  Object.keys(compact).forEach((key) => {
+    if (compact[key] === null || compact[key] === undefined || compact[key] === '') delete compact[key];
+  });
+  return compact;
+}
+
+function getAccountHistorySyncPayload(items) {
+  const list = Array.isArray(items) ? items : [items];
+  return list.map((item) => compactHistoryItemForAccountSync(item)).filter(Boolean);
+}
+
 function saveHistory() {
   const key = getScopedStorageKey('nano_history');
   history = dedupeHistoryItems(history).map((item) => {
@@ -3432,6 +3520,7 @@ function setSelectOptions(selectEl, items) {
     selectEl.appendChild(opt);
   }
   if (prev) selectEl.value = prev;
+  if (typeof queueApplyPendingPersistedControls === 'function') queueApplyPendingPersistedControls();
 }
 
 function getSelected3dModelId() {
@@ -3636,6 +3725,7 @@ function selectLtx23Model(modelId, options = {}) {
   updateVideoUiVisibility();
   renderVideoOptionsUI();
   if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
+  try { refreshVideo3TierUi(); } catch (_) {}
 }
 window.selectLtx23Model = selectLtx23Model;
 
@@ -3843,6 +3933,7 @@ function selectSeedance2Model(modelId, options = {}) {
   renderVideoOptionsUI();
   updateSeedance2ReferenceUi();
   if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
+  try { refreshVideo3TierUi(); } catch (_) {}
 }
 window.selectSeedance2Model = selectSeedance2Model;
 
@@ -4133,9 +4224,60 @@ function buildVideoOptionInput(key, modelMeta) {
   return wrap;
 }
 
+// Per-model memory of dynamic video options so each model remembers its last
+// settings across reloads. Keyed by video model id; values are { key: value }.
+let videoOptionsByModel = {};
+
+function captureVideoOptionsToMemory() {
+  const sel = qs('videoModel');
+  const modelId = sel ? String(sel.value || '').trim() : '';
+  if (!modelId) return;
+  const host = qs('videoOptionsDynamic');
+  if (!host) return;
+  const els = host.querySelectorAll('[data-opt-key]');
+  if (!els || !els.length) return;
+  const map = {};
+  els.forEach((el) => {
+    const k = el.dataset.optKey;
+    if (!k) return;
+    if (el.type === 'checkbox') { map[k] = !!el.checked; return; }
+    if ('value' in el) map[k] = el.value;
+  });
+  videoOptionsByModel[modelId] = map;
+}
+
+function applyVideoOptionsFromMemory() {
+  const sel = qs('videoModel');
+  const modelId = sel ? String(sel.value || '').trim() : '';
+  if (!modelId) return;
+  const map = videoOptionsByModel[modelId];
+  if (!map || typeof map !== 'object') return;
+  const host = qs('videoOptionsDynamic');
+  if (!host) return;
+  const els = host.querySelectorAll('[data-opt-key]');
+  els.forEach((el) => {
+    const k = el.dataset.optKey;
+    if (!k || !Object.prototype.hasOwnProperty.call(map, k)) return;
+    const v = map[k];
+    if (el.type === 'checkbox') { el.checked = !!v; return; }
+    if ('value' in el) el.value = (v == null ? '' : String(v));
+  });
+}
+
 function renderVideoOptionsUI() {
   const host = qs('videoOptionsDynamic');
   if (!host) return;
+
+  // Hook delegated change/input listeners once so per-model option changes persist.
+  if (!host.dataset.persistHooked) {
+    host.dataset.persistHooked = 'true';
+    const onOptionChange = () => {
+      try { captureVideoOptionsToMemory(); } catch (_) {}
+      if (typeof saveAppState === 'function') saveAppState();
+    };
+    host.addEventListener('change', onOptionChange);
+    host.addEventListener('input', onOptionChange);
+  }
 
   host.innerHTML = '';
 
@@ -4156,6 +4298,8 @@ function renderVideoOptionsUI() {
 
   host.appendChild(grid);
   localizeVideoOptionFields(host);
+  try { applyVideoOptionsFromMemory(); } catch (_) {}
+  queueApplyPendingPersistedControls();
 }
 
 function collectVideoOptionsFromUI() {
@@ -4309,33 +4453,62 @@ function ensureVideoControls() {
 
   loadVideoModels()
     .then(() => {
+      // If a video restore is pending (saved state from a previous session),
+      // let applyVideoRestore handle the dropdown selection so we don't
+      // accidentally pick the family-priority default (Kling) on first open.
+      if (window._pendingVideoRestore && typeof window.applyVideoRestore === 'function') {
+        window.applyVideoRestore().then(() => { try { refreshVideo3TierUi(); } catch (_) {} });
+        return;
+      }
       refreshVideoModelDropdown();
       const items = getVideoModelsForTab(currentVideoTab);
-      try {
-        const saved = JSON.parse(localStorage.getItem(APP_STATE_KEY) || '{}');
-        const savedVideoModelId = saved && saved.selects ? String(saved.selects.videoModel || '') : '';
-        const savedKlingModelId = saved && saved.selects ? String(saved.selects.kling3Model || '') : '';
-        if (savedVideoModelId && modelSel && items.some((m) => m.id === savedVideoModelId)) {
-          modelSel.value = savedVideoModelId;
-        } else if (savedKlingModelId && modelSel && items.some((m) => m.id === savedKlingModelId)) {
-          modelSel.value = savedKlingModelId;
-        }
-      } catch (_) {}
       if (modelSel && (!modelSel.value || !items.some((m) => m.id === modelSel.value)) && items[0]) {
         modelSel.value = items[0].id;
       }
       updateVideoUiVisibility();
       renderVideoOptionsUI();
+      try { refreshVideo3TierUi(); } catch (_) {}
     })
     .catch((e) => {
       showToast(e && e.message ? e.message : String(e), 'error');
     });
 
-  if (modelSel) {
+  if (modelSel && !modelSel.dataset.persistHooked) {
+    modelSel.dataset.persistHooked = 'true';
     modelSel.addEventListener('change', () => {
+      // User changed video model via the native dropdown: derive all related
+      // state (tab, family, remembered selection) and persist it so a reload
+      // restores the exact choice, not whichever dropdown item is first.
+      // User has made a fresh selection: invalidate the saved-state shadow
+      // so the boot/navigation watchdog stops trying to reassert the old id.
+      if (window._savedVideoState) window._savedVideoState = null;
+      try {
+        const newId = String(modelSel.value || '').trim();
+        if (newId) {
+          if (isLtx23VideoModelId(newId)) {
+            selectLtx23Model(newId, { skipSave: true });
+          } else if (isSeedance2VideoModelId(newId)) {
+            selectSeedance2Model(newId, { skipSave: true });
+          } else if (isKling3VideoModelId(newId)) {
+            const klingTab = getKling3TabForModelId(newId);
+            if (klingTab) {
+              switchKling3Tab(klingTab, { skipSave: true, skipVideoSelectionSync: false, preferredModelId: newId });
+            }
+          } else {
+            const meta = VIDEO_MODEL_MAP.get(newId);
+            const targetTab = meta && meta.kind ? getVideoTabForModelKind(meta.kind) : '';
+            if (targetTab && targetTab !== currentVideoTab) {
+              currentVideoTab = targetTab;
+              setActiveVideoTabButtonState(targetTab);
+            }
+          }
+        }
+      } catch (_) {}
       updateVideoUiVisibility();
       renderVideoOptionsUI();
       updateSeedance2ReferenceUi();
+      try { refreshVideo3TierUi(); } catch (_) {}
+      if (typeof saveAppState === 'function') saveAppState();
     });
   }
 
@@ -4564,6 +4737,7 @@ function switchVideoTab(tab) {
   }
 
   if (typeof saveAppState === 'function') saveAppState();
+  try { refreshVideo3TierUi(); } catch (_) {}
 }
 
 // Helper to animate a settings grid
@@ -4573,6 +4747,316 @@ function animateGrid(el) {
   void el.offsetWidth;
   el.classList.add('grid-enter');
 }
+
+// ==================== VIDEO 3-TIER UI CONTROLLER ====================
+// Dynamic engine discovery from loaded VIDEO_MODELS. Engines are grouped
+// by brand family. The bar, mode row, and variant chips are fully JS-rendered.
+
+var VIDEO_ENGINE_REGISTRY = [
+  { id: 'kling',    label: 'Kling',    tag: '3.0 / O3',  order: 1 },
+  { id: 'veo',      label: 'Veo',      tag: '3.1',        order: 2 },
+  { id: 'sora',     label: 'Sora',     tag: '2',          order: 3 },
+  { id: 'hailuo',   label: 'Hailuo',   tag: '2.3',        order: 4 },
+  { id: 'seedance', label: 'Seedance', tag: '2.0',        order: 5 },
+  { id: 'ltx',      label: 'LTX',      tag: '2.3',        order: 6 },
+  { id: 'pixverse', label: 'PixVerse', tag: 'v5.5',       order: 7 },
+  { id: 'wan',      label: 'Wan',      tag: 'v2.6',       order: 8 },
+  { id: 'hunyuan',  label: 'Hunyuan',  tag: '',            order: 9 },
+  { id: 'grok',     label: 'Grok',     tag: '',            order: 10 },
+  { id: 'alibaba',  label: 'Alibaba',  tag: 'Happy Horse', order: 11 },
+  { id: 'other',    label: 'Other',    tag: '...', order: 99 },
+];
+var VIDEO_ENGINE_MAP = new Map(VIDEO_ENGINE_REGISTRY.map(function(e) { return [e.id, e]; }));
+
+var ALL_VIDEO_MODES = ['text-to-video','image-to-video','video-to-video','reference-to-video','audio-to-video'];
+
+var VIDEO_MODE_META = {
+  'text-to-video':      { icon: 'type',   label: 'Text',  i18n: 'vtab_text' },
+  'image-to-video':     { icon: 'image',  label: 'Image', i18n: 'vtab_image' },
+  'video-to-video':     { icon: 'film',   label: 'Video', i18n: 'vtab_video' },
+  'reference-to-video': { icon: 'layers', label: 'Ref',   i18n: 'vtab_ref' },
+  'audio-to-video':     { icon: 'music',  label: 'Audio', i18n: 'vtab_audio' },
+};
+
+function getEngineForModelId(modelId) {
+  if (!modelId) return null;
+  var id = String(modelId);
+  if (isKling3VideoModelId(id)) return 'kling';
+  if (isLtx23VideoModelId(id)) return 'ltx';
+  if (isSeedance2VideoModelId(id)) return 'seedance';
+  if (id.startsWith('kling-')) return 'kling';
+  if (id.startsWith('ltx-')) return 'ltx';
+  if (id.startsWith('seedance-')) return 'seedance';
+  if (id.startsWith('veo')) return 'veo';
+  if (id.startsWith('sora-')) return 'sora';
+  if (id.startsWith('hailuo-')) return 'hailuo';
+  if (id.startsWith('pixverse-')) return 'pixverse';
+  if (id.startsWith('wan-')) return 'wan';
+  if (id.startsWith('hunyuan-')) return 'hunyuan';
+  if (id.startsWith('grok-')) return 'grok';
+  if (id.startsWith('happy-horse-') || id.startsWith('alibaba-')) return 'alibaba';
+  return 'other';
+}
+
+function getCurrentVideoEngine() {
+  var sel = qs('videoModel');
+  var id = sel ? String(sel.value || '').trim() : '';
+  var fromModel = getEngineForModelId(id);
+  if (fromModel) return fromModel;
+  if (window._currentVideoEngine && VIDEO_ENGINE_MAP.has(window._currentVideoEngine)) {
+    return window._currentVideoEngine;
+  }
+  return 'kling';
+}
+
+function getVideoModelsForEngineMode(engine, mode) {
+  if (!Array.isArray(VIDEO_MODELS)) return [];
+  return VIDEO_MODELS.filter(function(m) {
+    if (!m || !m.id) return false;
+    var eng = getEngineForModelId(m.id);
+    if (eng !== engine) return false;
+    var tab = getVideoTabForModelKind(m.kind || '');
+    return tab === mode;
+  }).sort(function(a, b) {
+    var ra = Number.isFinite(Number(a && a.selectorRank)) ? Number(a.selectorRank) : DEFAULT_VIDEO_SELECTOR_RANK;
+    var rb = Number.isFinite(Number(b && b.selectorRank)) ? Number(b.selectorRank) : DEFAULT_VIDEO_SELECTOR_RANK;
+    if (ra !== rb) return ra - rb;
+    return String(a && a.label || '').localeCompare(String(b && b.label || ''));
+  });
+}
+
+function getActiveEngines() {
+  if (!Array.isArray(VIDEO_MODELS) || !VIDEO_MODELS.length) {
+    return VIDEO_ENGINE_REGISTRY.filter(function(e) { return e.id === 'kling' || e.id === 'ltx' || e.id === 'seedance'; });
+  }
+  var seen = new Set();
+  VIDEO_MODELS.forEach(function(m) {
+    if (m && m.id) seen.add(getEngineForModelId(m.id));
+  });
+  return VIDEO_ENGINE_REGISTRY.filter(function(e) { return seen.has(e.id); }).sort(function(a, b) { return a.order - b.order; });
+}
+
+function getModesForEngine(engine) {
+  var modes = [];
+  ALL_VIDEO_MODES.forEach(function(mode) {
+    if (getVideoModelsForEngineMode(engine, mode).length > 0) modes.push(mode);
+  });
+  return modes;
+}
+
+function getShortVariantLabel(model) {
+  if (!model) return '';
+  var id = String(model.id || '');
+  var lbl = String(model.label || id);
+  if (isKling3VideoModelId(id)) {
+    var isO3 = id.indexOf('o3') >= 0;
+    var tier = id.indexOf('pro') >= 0 ? 'Pro' : (id.indexOf('standard') >= 0 ? 'Std' : '');
+    var motion = id.indexOf('motion') >= 0 ? ' Motion' : '';
+    var v2vKind = id.indexOf('v2v-edit') >= 0 ? ' Edit' : (id.indexOf('v2v-ref') >= 0 ? ' Ref' : '');
+    return (isO3 ? 'O3 ' : 'V3 ') + (tier || 'Pro') + motion + v2vKind;
+  }
+  if (isLtx23VideoModelId(id)) {
+    var ltxFamily = LTX23_MODEL_TO_FAMILY.get(id);
+    if (ltxFamily) {
+      var ltxEntry = (LTX23_MODELS[ltxFamily] || []).find(function(x) { return x.id === id; });
+      if (ltxEntry && ltxEntry.label) return String(ltxEntry.label);
+    }
+  }
+  if (isSeedance2VideoModelId(id)) {
+    var sdFamily = SEEDANCE2_MODEL_TO_FAMILY.get(id);
+    if (sdFamily) {
+      var sdEntry = (SEEDANCE2_MODELS[sdFamily] || []).find(function(x) { return x.id === id; });
+      if (sdEntry && sdEntry.label) return String(sdEntry.label);
+    }
+  }
+  lbl = lbl.replace(/\s*\([^)]*\)\s*$/g, '').replace(/\s*\[[^\]]*\]\s*$/g, '').trim();
+  var engine = getEngineForModelId(id);
+  var reg = VIDEO_ENGINE_MAP.get(engine);
+  if (reg && reg.label) {
+    lbl = lbl.replace(new RegExp('^' + reg.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s-]*', 'i'), '');
+  }
+  lbl = lbl.replace(/\s*\([^)]*\)\s*$/g, '').replace(/\s*\[[^\]]*\]\s*$/g, '').trim();
+  if (!lbl) lbl = model.label || id;
+  return lbl;
+}
+
+function renderVideoEngineBar() {
+  var bar = qs('videoEngineBar');
+  if (!bar) return;
+  var engine = getCurrentVideoEngine();
+  window._currentVideoEngine = engine;
+  var engines = getActiveEngines();
+  bar.innerHTML = engines.map(function(eng) {
+    var isActive = eng.id === engine;
+    var tag = eng.tag ? '<span class="video-engine-pill-tag">' + escapeHtml(eng.tag) + '</span>' : '';
+    return '<button class="video-engine-pill' + (isActive ? ' active' : '') + '" type="button" data-engine="' + eng.id + '" role="tab" aria-selected="' + isActive + '">' +
+      '<span class="video-engine-pill-name">' + escapeHtml(eng.label) + '</span>' + tag + '</button>';
+  }).join('');
+  if (!bar.dataset.bound) {
+    bar.dataset.bound = 'true';
+    bar.addEventListener('click', function(ev) {
+      var btn = ev.target.closest('.video-engine-pill');
+      if (!btn) return;
+      var nextEngine = btn.dataset.engine;
+      if (!nextEngine || nextEngine === window._currentVideoEngine) return;
+      switchVideoEngine(nextEngine);
+    });
+  }
+}
+
+function renderVideoModeBar() {
+  var bar = qs('videoModeBar');
+  if (!bar) return;
+  var engine = getCurrentVideoEngine();
+  var activeModes = getModesForEngine(engine);
+  var activeSet = new Set(activeModes);
+  bar.innerHTML = ALL_VIDEO_MODES.map(function(mode) {
+    var meta = VIDEO_MODE_META[mode] || {};
+    var visible = activeSet.has(mode);
+    var isActive = visible && mode === currentVideoTab;
+    return '<button class="video-mode-pill' + (isActive ? ' active' : '') + '"' +
+      ' type="button" data-mode="' + mode + '" role="tab"' +
+      ' aria-selected="' + isActive + '"' +
+      ' title="' + escapeHtml(meta.label || mode) + '"' +
+      (visible ? '' : ' hidden') + '>' +
+      '<i data-lucide="' + (meta.icon || 'circle') + '"></i>' +
+      '<span class="video-mode-pill-label">' + escapeHtml(meta.label || mode) + '</span>' +
+      '</button>';
+  }).join('');
+  var visibleCount = activeModes.length;
+  if (visibleCount > 0) {
+    bar.style.gridTemplateColumns = 'repeat(' + visibleCount + ', minmax(0, 1fr))';
+  }
+  if (window.lucide && typeof window.lucide.createIcons === 'function') {
+    try { window.lucide.createIcons({ attrs: { class: '' }, nameAttr: 'data-lucide' }); } catch (_) {}
+  }
+  if (!bar.dataset.bound) {
+    bar.dataset.bound = 'true';
+    bar.addEventListener('click', function(ev) {
+      var btn = ev.target.closest('.video-mode-pill');
+      if (!btn || btn.hidden) return;
+      var m = btn.dataset.mode;
+      if (!m) return;
+      switchVideoEngineMode(window._currentVideoEngine || getCurrentVideoEngine(), m);
+    });
+  }
+}
+
+function renderVideoVariantRow() {
+  var row = qs('videoVariantRow');
+  if (!row) return;
+  var engine = getCurrentVideoEngine();
+  var mode = currentVideoTab;
+  var models = getVideoModelsForEngineMode(engine, mode);
+  if (!models.length) { row.hidden = true; row.innerHTML = ''; return; }
+  if (models.length === 1) {
+    var sel = qs('videoModel');
+    if (sel && sel.value !== models[0].id) {
+      setTimeout(function() { selectVideoModelById(models[0].id); }, 0);
+    }
+    row.hidden = true; row.innerHTML = '';
+    return;
+  }
+  var sel2 = qs('videoModel');
+  var currentId = sel2 ? String(sel2.value || '').trim() : '';
+  row.hidden = false;
+  row.innerHTML = models.map(function(m) {
+    var label = escapeHtml(getShortVariantLabel(m));
+    var active = m.id === currentId ? ' active' : '';
+    return '<button class="video-variant-chip' + active + '" type="button" data-model-id="' + escapeHtml(m.id) + '" title="' + escapeHtml(m.label || m.id) + '">' + label + '</button>';
+  }).join('');
+  if (!row.dataset.bound) {
+    row.dataset.bound = 'true';
+    row.addEventListener('click', function(ev) {
+      var btn = ev.target.closest('.video-variant-chip');
+      if (!btn) return;
+      var id = btn.dataset.modelId;
+      if (id) selectVideoModelById(id);
+    });
+  }
+}
+
+function selectVideoModelById(id) {
+  if (!id) return;
+  if (isLtx23VideoModelId(id)) {
+    selectLtx23Model(id);
+  } else if (isSeedance2VideoModelId(id)) {
+    selectSeedance2Model(id);
+  } else if (isKling3VideoModelId(id)) {
+    var klingTab = getKling3TabForModelId(id);
+    if (klingTab) {
+      switchKling3Tab(klingTab, { skipVideoSelectionSync: false, preferredModelId: id });
+    }
+  } else {
+    var meta = VIDEO_MODEL_MAP.get(id);
+    var targetTab = meta && meta.kind ? getVideoTabForModelKind(meta.kind) : '';
+    if (targetTab && targetTab !== currentVideoTab) {
+      currentVideoTab = targetTab;
+      setActiveVideoTabButtonState(targetTab);
+    }
+    refreshVideoModelDropdown(id);
+    var sel = qs('videoModel');
+    if (sel) sel.value = id;
+    updateVideoUiVisibility();
+    renderVideoOptionsUI();
+    if (typeof saveAppState === 'function') saveAppState();
+  }
+  refreshVideo3TierUi();
+}
+window.selectVideoModelById = selectVideoModelById;
+
+function switchVideoEngine(nextEngine) {
+  if (!nextEngine || !VIDEO_ENGINE_MAP.has(nextEngine)) return;
+  window._currentVideoEngine = nextEngine;
+  var allowedModes = getModesForEngine(nextEngine);
+  var nextMode = allowedModes.indexOf(currentVideoTab) >= 0 ? currentVideoTab : '';
+  if (!nextMode || !getVideoModelsForEngineMode(nextEngine, nextMode).length) {
+    nextMode = allowedModes.find(function(m) { return getVideoModelsForEngineMode(nextEngine, m).length; }) || allowedModes[0];
+  }
+  switchVideoEngineMode(nextEngine, nextMode);
+}
+window.switchVideoEngine = switchVideoEngine;
+
+function switchVideoEngineMode(engine, mode) {
+  if (!engine || !mode) return;
+  window._currentVideoEngine = engine;
+  var models = getVideoModelsForEngineMode(engine, mode);
+  if (!models.length) {
+    currentVideoTab = mode;
+    setActiveVideoTabButtonState(mode);
+    refreshVideo3TierUi();
+    return;
+  }
+  var preferred = '';
+  if (engine === 'kling') {
+    var candidateKlingTabs = Object.keys(KLING3_TAB_TO_VIDEO_TAB).filter(function(kt) { return KLING3_TAB_TO_VIDEO_TAB[kt] === mode; });
+    for (var ci = 0; ci < candidateKlingTabs.length; ci++) {
+      var kt = candidateKlingTabs[ci];
+      if (kling3SelectedModelByTab[kt] && models.some(function(m) { return m.id === kling3SelectedModelByTab[kt]; })) {
+        preferred = kling3SelectedModelByTab[kt]; break;
+      }
+    }
+  } else if (engine === 'ltx') {
+    if (ltx23SelectedModelByFamily[mode] && models.some(function(m) { return m.id === ltx23SelectedModelByFamily[mode]; })) {
+      preferred = ltx23SelectedModelByFamily[mode];
+    }
+  } else if (engine === 'seedance') {
+    if (seedance2SelectedModelByFamily[mode] && models.some(function(m) { return m.id === seedance2SelectedModelByFamily[mode]; })) {
+      preferred = seedance2SelectedModelByFamily[mode];
+    }
+  }
+  var targetId = preferred || models[0].id;
+  selectVideoModelById(targetId);
+}
+window.switchVideoEngineMode = switchVideoEngineMode;
+
+function refreshVideo3TierUi() {
+  try { renderVideoEngineBar(); } catch (_) {}
+  try { renderVideoModeBar(); } catch (_) {}
+  try { renderVideoVariantRow(); } catch (_) {}
+}
+window.refreshVideo3TierUi = refreshVideo3TierUi;
+
 
 // ==================== KLING 3 FUNCTIONS ====================
 function getKling3ModelsForTab(tab) {
@@ -4677,6 +5161,7 @@ function switchKling3Tab(tab, options = {}) {
     renderVideoOptionsUI();
   }
   if (!options.skipSave && typeof saveAppState === 'function') saveAppState();
+  try { refreshVideo3TierUi(); } catch (_) {}
 }
 window.switchKling3Tab = switchKling3Tab;
 
@@ -4834,12 +5319,14 @@ function addKling3MultiPromptItem() {
   const id = Date.now();
   kling3MultiPrompts.push({ id, prompt: '', duration: '5' });
   renderKling3MultiPrompts();
+  if (typeof saveAppState === 'function') saveAppState();
 }
 window.addKling3MultiPromptItem = addKling3MultiPromptItem;
 
 function removeKling3MultiPromptItem(id) {
   kling3MultiPrompts = kling3MultiPrompts.filter(p => p.id !== id);
   renderKling3MultiPrompts();
+  if (typeof saveAppState === 'function') saveAppState();
 }
 window.removeKling3MultiPromptItem = removeKling3MultiPromptItem;
 
@@ -4873,6 +5360,7 @@ function renderKling3MultiPrompts() {
       const id = Number(e.target.dataset.id);
       const item = kling3MultiPrompts.find(p => p.id === id);
       if (item) item.prompt = e.target.value;
+      if (typeof saveAppState === 'function') saveAppState();
     });
   });
   list.querySelectorAll('.k3-mp-duration').forEach(el => {
@@ -4880,6 +5368,7 @@ function renderKling3MultiPrompts() {
       const id = Number(e.target.dataset.id);
       const item = kling3MultiPrompts.find(p => p.id === id);
       if (item) item.duration = e.target.value;
+      if (typeof saveAppState === 'function') saveAppState();
     });
   });
 
@@ -5279,161 +5768,54 @@ function replaceSelectOptions(selectEl, options, fallbackValue) {
     selectEl.appendChild(opt);
   });
   if (nextValue) selectEl.value = nextValue;
+  if (typeof queueApplyPendingPersistedControls === 'function') queueApplyPendingPersistedControls();
 }
 
 function parseGptImageDimension(value) {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
   return Math.round(num);
 }
 
-function snapToMultiple(value, step = 16, mode = 'round') {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return null;
-  if (mode === 'ceil') return Math.ceil(num / step) * step;
-  if (mode === 'floor') return Math.floor(num / step) * step;
-  return Math.round(num / step) * step;
+function updateGptSizeRangeFill(rangeEl) {
+  if (!rangeEl) return;
+  const min = Number(rangeEl.min) || 0;
+  const max = Number(rangeEl.max) || 100;
+  const val = Number(rangeEl.value) || min;
+  const pct = max > min ? ((val - min) / (max - min)) * 100 : 50;
+  rangeEl.style.setProperty('--range-fill', Math.max(0, Math.min(100, pct)) + '%');
 }
 
-function getGptImage2CustomSizeBaseHint() {
-  return `Auto-adjusts to valid values. Max edge is ${GPT_IMAGE_2_MAX_EDGE}px. Total pixels must stay between ${GPT_IMAGE_2_MIN_PIXELS.toLocaleString()} and ${GPT_IMAGE_2_MAX_PIXELS.toLocaleString()}.`;
-}
-
-function setGptImage2CustomSizeHint(hintId, message, visible) {
-  const hintEl = qs(hintId);
-  if (!hintEl) return;
-  hintEl.textContent = message || getGptImage2CustomSizeBaseHint();
-  hintEl.style.display = visible ? 'block' : 'none';
-}
-
-function normalizeGptImage2CustomSize(width, height) {
-  if (!width || !height) {
-    return {
-      ok: false,
-      message: 'Enter both width and height.',
-      width,
-      height,
-    };
-  }
-
-  const originalWidth = width;
-  const originalHeight = height;
-  const notes = [];
-  let w = Math.max(16, Number(width) || 16);
-  let h = Math.max(16, Number(height) || 16);
-
-  if (w !== originalWidth || h !== originalHeight) {
-    notes.push('Minimum edge is 16px.');
-  }
-
-  if (w % 16 !== 0) {
-    w = snapToMultiple(w, 16, 'round');
-    notes.push('Width snaps to multiples of 16.');
-  }
-  if (h % 16 !== 0) {
-    h = snapToMultiple(h, 16, 'round');
-    notes.push('Height snaps to multiples of 16.');
-  }
-
-  const maxEdge = Math.max(w, h);
-  if (maxEdge > GPT_IMAGE_2_MAX_EDGE) {
-    const scale = GPT_IMAGE_2_MAX_EDGE / maxEdge;
-    w *= scale;
-    h *= scale;
-    notes.push(`Max edge is ${GPT_IMAGE_2_MAX_EDGE}px.`);
-  }
-
-  if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
-    if (w >= h) h = w / 3;
-    else w = h / 3;
-    notes.push('Max aspect ratio is 3:1.');
-  }
-
-  let pixels = w * h;
-  if (pixels > GPT_IMAGE_2_MAX_PIXELS) {
-    const scale = Math.sqrt(GPT_IMAGE_2_MAX_PIXELS / pixels);
-    w *= scale;
-    h *= scale;
-    notes.push(`Max total pixels is ${GPT_IMAGE_2_MAX_PIXELS.toLocaleString()}.`);
-  }
-
-  pixels = w * h;
-  if (pixels < GPT_IMAGE_2_MIN_PIXELS) {
-    const scale = Math.sqrt(GPT_IMAGE_2_MIN_PIXELS / pixels);
-    w *= scale;
-    h *= scale;
-    notes.push(`Minimum total pixels is ${GPT_IMAGE_2_MIN_PIXELS.toLocaleString()}.`);
-  }
-
-  w = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(w, 16, 'round') || 16));
-  h = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(h, 16, 'round') || 16));
-
-  if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
-    if (w >= h) h = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(w / 3, 16, 'ceil') || 16));
-    else w = Math.max(16, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(h / 3, 16, 'ceil') || 16));
-  }
-
-  let guard = 0;
-  while (w * h < GPT_IMAGE_2_MIN_PIXELS && guard < 2048) {
-    guard += 1;
-    if ((w <= h || h >= GPT_IMAGE_2_MAX_EDGE) && w < GPT_IMAGE_2_MAX_EDGE) w += 16;
-    else if (h < GPT_IMAGE_2_MAX_EDGE) h += 16;
-    if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
-      if (w >= h) h = Math.max(h, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(w / 3, 16, 'ceil') || h));
-      else w = Math.max(w, Math.min(GPT_IMAGE_2_MAX_EDGE, snapToMultiple(h / 3, 16, 'ceil') || w));
-    }
-  }
-
-  guard = 0;
-  while (w * h > GPT_IMAGE_2_MAX_PIXELS && guard < 2048) {
-    guard += 1;
-    if ((w >= h || h <= 16) && w > 16) w -= 16;
-    else if (h > 16) h -= 16;
-    if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 3) {
-      if (w >= h) h = Math.max(16, Math.min(h, snapToMultiple(w / 3, 16, 'ceil') || h));
-      else w = Math.max(16, Math.min(w, snapToMultiple(h / 3, 16, 'ceil') || w));
-    }
-  }
-
-  const changed = w !== originalWidth || h !== originalHeight;
-  const detail = changed
-    ? `Adjusted to ${w} × ${h}. ${notes.join(' ')}`
-    : getGptImage2CustomSizeBaseHint();
-
-  return {
-    ok: true,
-    width: w,
-    height: h,
-    changed,
-    message: detail.trim() || getGptImage2CustomSizeBaseHint(),
+function bindGptSizePair(rangeId) {
+  const rangeEl = qs(rangeId);
+  const inputEl = qs(rangeId + 'Value');
+  if (!rangeEl || !inputEl) return;
+  const onRange = () => {
+    inputEl.value = rangeEl.value;
+    updateGptSizeRangeFill(rangeEl);
+    if (typeof saveAppState === 'function') saveAppState();
   };
+  rangeEl.addEventListener('input', onRange);
+  rangeEl.addEventListener('change', onRange);
+  const onInput = () => {
+    const v = parseGptImageDimension(inputEl.value);
+    if (v !== null) {
+      const mn = Number(rangeEl.min) || 1;
+      const mx = Number(rangeEl.max) || 4096;
+      rangeEl.value = String(Math.max(mn, Math.min(mx, v)));
+      updateGptSizeRangeFill(rangeEl);
+    }
+    if (typeof saveAppState === 'function') saveAppState();
+  };
+  inputEl.addEventListener('input', onInput);
+  inputEl.addEventListener('change', onInput);
+  updateGptSizeRangeFill(rangeEl);
 }
 
-function syncGptImage2CustomSizeFields(widthId, heightId, hintId, visible) {
-  const widthEl = qs(widthId);
-  const heightEl = qs(heightId);
-  if (!widthEl || !heightEl) return null;
-  const width = parseGptImageDimension(widthEl.value);
-  const height = parseGptImageDimension(heightEl.value);
-  if (!visible) {
-    setGptImage2CustomSizeHint(hintId, '', false);
-    return null;
-  }
-  if (!width || !height) {
-    setGptImage2CustomSizeHint(hintId, getGptImage2CustomSizeBaseHint(), true);
-    return null;
-  }
-  const normalized = normalizeGptImage2CustomSize(width, height);
-  if (!normalized || !normalized.ok) {
-    setGptImage2CustomSizeHint(hintId, normalized && normalized.message ? normalized.message : getGptImage2CustomSizeBaseHint(), true);
-    return normalized;
-  }
-  if (normalized.changed) {
-    widthEl.value = String(normalized.width);
-    heightEl.value = String(normalized.height);
-  }
-  setGptImage2CustomSizeHint(hintId, normalized.message, true);
-  return normalized;
+function bindGptImage2CustomSizePair(widthId, heightId, hintId, selectId) {
+  bindGptSizePair(widthId);
+  bindGptSizePair(heightId);
 }
 
 function buildGptImageSizePayload(selectId, widthId, heightId, hintId, modelId) {
@@ -5444,9 +5826,22 @@ function buildGptImageSizePayload(selectId, widthId, heightId, hintId, modelId) 
     return sizeValue;
   }
   if (sizeValue !== 'custom') return sizeValue;
-  const normalized = syncGptImage2CustomSizeFields(widthId, heightId, hintId, true);
-  if (!normalized || !normalized.ok) throw new Error((normalized && normalized.message) || 'Enter both width and height.');
-  return { width: normalized.width, height: normalized.height };
+  const inputW = qs(widthId + 'Value');
+  const inputH = qs(heightId + 'Value');
+  const rangeW = qs(widthId);
+  const rangeH = qs(heightId);
+  const rawWidth = parseGptImageDimension((inputW && inputW.value) || (rangeW && rangeW.value));
+  const rawHeight = parseGptImageDimension((inputH && inputH.value) || (rangeH && rangeH.value));
+  return { width: rawWidth, height: rawHeight };
+}
+
+function syncGptImage2CustomSizeFields(widthId, heightId, hintId, visible) {
+  const rangeW = qs(widthId);
+  const rangeH = qs(heightId);
+  const inputW = qs(widthId + 'Value');
+  const inputH = qs(heightId + 'Value');
+  if (rangeW) updateGptSizeRangeFill(rangeW);
+  if (rangeH) updateGptSizeRangeFill(rangeH);
 }
 
 function updateGptTextControls() {
@@ -5674,6 +6069,12 @@ function switchMode(mode) {
     }
     ensureVideoControls();
     updateVideoUiVisibility();
+    try { refreshVideo3TierUi(); } catch (_) {}
+    // Re-arm the watchdog so a saved selection from a previous session is
+    // reasserted if anything in the (re)open path overwrites it.
+    if (typeof window.scheduleVideoRestoreWatchdog === 'function') {
+      try { window.scheduleVideoRestoreWatchdog(); } catch (_) {}
+    }
   }
   if (mode === '3d') {
     const el = qs('threeDUploadGroup');
@@ -6440,10 +6841,7 @@ function initToolsControls() {
 
   const toolsGptSizeSel = qs('toolsGptImageSize');
   if (toolsGptSizeSel) toolsGptSizeSel.addEventListener('change', updateToolsGptControls);
-  ['toolsGptImageWidth', 'toolsGptImageHeight'].forEach((id) => {
-    const el = qs(id);
-    if (el) el.addEventListener('change', () => syncGptImage2CustomSizeFields('toolsGptImageWidth', 'toolsGptImageHeight', 'toolsGptCustomSizeHint', !!(qs('toolsGptImageSize') && qs('toolsGptImageSize').value === 'custom')));
-  });
+  bindGptImage2CustomSizePair('toolsGptImageWidth', 'toolsGptImageHeight', 'toolsGptCustomSizeHint', 'toolsGptImageSize');
 
   wizBuildTitleChips();
   wizBuildCharChips();
@@ -8079,7 +8477,24 @@ function assembleWbCardPrompt(productImageCount) {
     const input = item.querySelector('input[type="text"], textarea.wiz-char-input');
     if (input && input.value.trim()) chars.push(input.value.trim());
   });
-  const fontStyle = (qs('toolsFontInput') ? qs('toolsFontInput').value.trim() : '') || 'Bold minimalist sans-serif';
+  const rawFontStyle = (qs('toolsFontInput') ? qs('toolsFontInput').value.trim() : '');
+  // The font picker stores a localized label (e.g. "Мягкий округлый") in toolsFontInput.
+  // For the prompt we always need the canonical English label so the model never sees
+  // translated UI strings like "Мягкий" inside the typography style guide.
+  const fontStyleEnglish = (() => {
+    if (!rawFontStyle) return '';
+    if (typeof WIZ_FONTS === 'undefined' || !Array.isArray(WIZ_FONTS)) return rawFontStyle;
+    const enDict = (window.TRANSLATIONS && window.TRANSLATIONS.en) ? window.TRANSLATIONS.en : null;
+    for (const f of WIZ_FONTS) {
+      const enLabel = enDict && enDict[f.val] ? enDict[f.val] : f.name;
+      const localizedLabel = (window.I18N && typeof I18N.t === 'function') ? I18N.t(f.val) : f.name;
+      if (rawFontStyle === enLabel || rawFontStyle === localizedLabel || rawFontStyle === f.name) {
+        return enLabel;
+      }
+    }
+    return rawFontStyle;
+  })();
+  const fontStyle = fontStyleEnglish || 'Bold minimalist sans-serif';
   const wishes = (qs('toolsWishesInput') ? qs('toolsWishesInput').value.trim() : '') || '';
   const featureLines = chars.length > 0 ? chars : ['Natural materials', 'Premium quality', 'Guaranteed'];
   const charsBlock = featureLines.map(c => `  • ${c}`).join('\n');
@@ -10330,8 +10745,7 @@ async function clearAllHistory(event) {
 
   try {
     const bridge = window.NanoAccountBridge || null;
-    const userId = bridge && typeof bridge.getScopedUserId === 'function' ? bridge.getScopedUserId() : null;
-    if (userId && typeof bridge.clearHistory === 'function') {
+    if (bridge && typeof bridge.clearHistory === 'function') {
       await bridge.clearHistory();
     }
     showToast(i18nText('toast_history_cleared', 'History cleared'));
@@ -12190,10 +12604,7 @@ function initInputs() {
   if (textModelSel) textModelSel.addEventListener('change', updateTextModelOptions);
   const gptTextSizeSel = qs('gptImageSize');
   if (gptTextSizeSel) gptTextSizeSel.addEventListener('change', updateGptTextControls);
-  ['gptImageWidth', 'gptImageHeight'].forEach((id) => {
-    const el = qs(id);
-    if (el) el.addEventListener('change', () => syncGptImage2CustomSizeFields('gptImageWidth', 'gptImageHeight', 'gptTextCustomSizeHint', !!(qs('gptImageSize') && qs('gptImageSize').value === 'custom')));
-  });
+  bindGptImage2CustomSizePair('gptImageWidth', 'gptImageHeight', 'gptTextCustomSizeHint', 'gptImageSize');
 
   // Edit model selector - update options and re-clamp images when model changes
   const editModelSel = qs('imageModelEdit');
@@ -12203,10 +12614,7 @@ function initInputs() {
   });
   const gptEditSizeSel = qs('editImageSize');
   if (gptEditSizeSel) gptEditSizeSel.addEventListener('change', updateGptEditControls);
-  ['editImageWidth', 'editImageHeight'].forEach((id) => {
-    const el = qs(id);
-    if (el) el.addEventListener('change', () => syncGptImage2CustomSizeFields('editImageWidth', 'editImageHeight', 'gptEditCustomSizeHint', !!(qs('editImageSize') && qs('editImageSize').value === 'custom')));
-  });
+  bindGptImage2CustomSizePair('editImageWidth', 'editImageHeight', 'gptEditCustomSizeHint', 'editImageSize');
 
   // --- Download buttons (forceDownload) ---
   const dlBtn = qs('downloadBtn');
@@ -12422,23 +12830,46 @@ async function wizIdbSaveImages() {
       }
       const r = new FileReader(); r.onload = () => res({ name: f.name, type: f.type, data: r.result }); r.readAsDataURL(f);
     });
+    const safeB64 = (src) => src ? toB64(src) : Promise.resolve(null);
+    const safeB64Arr = (arr) => Promise.all((arr || []).map(toB64));
     // Convert ALL files BEFORE opening the transaction to avoid TransactionInactiveError
-    const prodArr = await Promise.all(uploadedToolsImages.map(toB64));
-    const inspoArr = await Promise.all(uploadedInspoImages.map(toB64));
+    const prodArr = await safeB64Arr(uploadedToolsImages);
+    const inspoArr = await safeB64Arr(uploadedInspoImages);
+    const editArr = await safeB64Arr(uploadedImageFiles);
     const utilitySource = getToolsUtilitySource();
     const utilityAudioSource = getToolsUtilityAudioSource();
     const utilityVideoSource = getToolsUtilityVideoSource();
-    const utilityItem = utilitySource ? await toB64(utilitySource) : null;
-    const utilityAudioItem = utilityAudioSource ? await toB64(utilityAudioSource) : null;
+    const utilityItem = await safeB64(utilitySource);
+    const utilityAudioItem = await safeB64(utilityAudioSource);
     const utilityVideoItem = isRemoteAssetItem(utilityVideoSource) ? await toB64(utilityVideoSource) : null;
+    const managedData = {};
+    const managedKeys = [
+      'maskInput', 'videoInput', 'videoImageInput', 'referenceImagesInput',
+      'videoEndImageInput', 'audioInput',
+      'kling3StartImageInput', 'kling3EndImageInput', 'kling3VideoInput', 'kling3RefImagesInput',
+      'seedance2ReferenceImagesInput', 'seedance2ReferenceVideosInput', 'seedance2ReferenceAudiosInput',
+      'threeDFrontInput', 'threeDBackInput', 'threeDLeftInput', 'threeDRightInput',
+      'threeDMeshyTextureImageInput', 'threeDTopologyFileInput',
+      'threeDRetextureModelInput', 'threeDRetextureStyleImageInput',
+    ];
+    for (const key of managedKeys) {
+      const config = MANAGED_UPLOADS[key];
+      if (!config) continue;
+      const localFiles = toManagedFileArray(config.getFiles ? config.getFiles() : []);
+      const remoteFiles = getManagedUploadRemoteItems(config);
+      const allFiles = [...localFiles, ...remoteFiles].filter(Boolean);
+      if (allFiles.length > 0) managedData[key] = await safeB64Arr(allFiles);
+    }
     const db = await _wizIdbOpen();
     const tx = db.transaction('files', 'readwrite');
     const store = tx.objectStore('files');
     store.put(prodArr, 'productImages');
     store.put(inspoArr, 'inspoImages');
+    store.put(editArr, 'editImages');
     store.put(utilityItem, 'utilityImage');
     store.put(utilityAudioItem, 'utilityAudio');
     store.put(utilityVideoItem, 'utilityVideo');
+    store.put(managedData, 'managedUploads');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
     db.close();
   } catch (e) { console.warn('IDB save failed', e); }
@@ -12446,27 +12877,17 @@ async function wizIdbSaveImages() {
 async function wizIdbRestoreImages() {
   try {
     const db = await _wizIdbOpen();
-    // Issue BOTH requests synchronously before any await to keep the transaction active
-    const [prodArr, inspoArr, utilityItem, utilityAudioItem, utilityVideoItem] = await new Promise((resolve, reject) => {
+    const idbKeys = ['productImages', 'inspoImages', 'editImages', 'utilityImage', 'utilityAudio', 'utilityVideo', 'managedUploads'];
+    const results = await new Promise((resolve, reject) => {
       const tx = db.transaction('files', 'readonly');
       const store = tx.objectStore('files');
-      const prodReq = store.get('productImages');
-      const inspoReq = store.get('inspoImages');
-      const utilityReq = store.get('utilityImage');
-      const utilityAudioReq = store.get('utilityAudio');
-      const utilityVideoReq = store.get('utilityVideo');
-      let prod, inspo, utility, utilityAudio, utilityVideo, prodDone = false, inspoDone = false, utilityDone = false, utilityAudioDone = false, utilityVideoDone = false;
-      const check = () => { if (prodDone && inspoDone && utilityDone && utilityAudioDone && utilityVideoDone) resolve([prod, inspo, utility, utilityAudio, utilityVideo]); };
-      prodReq.onsuccess  = () => { prod  = prodReq.result  || null; prodDone  = true; check(); };
-      prodReq.onerror    = () => { prod  = null;                     prodDone  = true; check(); };
-      inspoReq.onsuccess = () => { inspo = inspoReq.result || null; inspoDone = true; check(); };
-      inspoReq.onerror   = () => { inspo = null;                    inspoDone = true; check(); };
-      utilityReq.onsuccess = () => { utility = utilityReq.result || null; utilityDone = true; check(); };
-      utilityReq.onerror   = () => { utility = null; utilityDone = true; check(); };
-      utilityAudioReq.onsuccess = () => { utilityAudio = utilityAudioReq.result || null; utilityAudioDone = true; check(); };
-      utilityAudioReq.onerror = () => { utilityAudio = null; utilityAudioDone = true; check(); };
-      utilityVideoReq.onsuccess = () => { utilityVideo = utilityVideoReq.result || null; utilityVideoDone = true; check(); };
-      utilityVideoReq.onerror = () => { utilityVideo = null; utilityVideoDone = true; check(); };
+      const out = {};
+      let pending = idbKeys.length;
+      for (const key of idbKeys) {
+        const req = store.get(key);
+        req.onsuccess = () => { out[key] = req.result || null; if (--pending === 0) resolve(out); };
+        req.onerror = () => { out[key] = null; if (--pending === 0) resolve(out); };
+      }
       tx.onerror = reject;
     });
     db.close();
@@ -12480,44 +12901,76 @@ async function wizIdbRestoreImages() {
       for (let i = 0; i < bstr.length; i++) u8[i] = bstr.charCodeAt(i);
       return new File([u8], item.name || 'image.jpg', { type: mime });
     };
-    if (Array.isArray(prodArr)) {
-      uploadedToolsImages = prodArr.map(b64ToFile).filter(Boolean);
+    if (Array.isArray(results.productImages)) {
+      uploadedToolsImages = results.productImages.map(b64ToFile).filter(Boolean);
       updateToolsImagePreview();
     }
-    if (Array.isArray(inspoArr)) {
-      uploadedInspoImages = inspoArr.map(b64ToFile).filter(Boolean);
+    if (Array.isArray(results.inspoImages)) {
+      uploadedInspoImages = results.inspoImages.map(b64ToFile).filter(Boolean);
       wizRenderInspoThumbs();
     }
-    const restoredUtilitySource = b64ToFile(utilityItem);
-    if (isRemoteAssetItem(restoredUtilitySource)) {
-      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityImageInput, restoredUtilitySource);
-      uploadedToolsUtilityImage = null;
-    } else {
-      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityImageInput, []);
-      uploadedToolsUtilityImage = restoredUtilitySource;
+    if (Array.isArray(results.editImages)) {
+      uploadedImageFiles = results.editImages.map(b64ToFile).filter(Boolean);
+      if (typeof updateImagePreview === 'function') updateImagePreview();
     }
-    const utilityInput = qs('toolsUtilityImageInput');
-    if (utilityInput && utilityInput._uploadConfig) refreshManagedUploadUi(utilityInput);
-    const restoredUtilityAudioSource = b64ToFile(utilityAudioItem);
-    if (isRemoteAssetItem(restoredUtilityAudioSource)) {
-      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityAudioInput, restoredUtilityAudioSource);
-      uploadedToolsUtilityAudio = null;
-    } else {
-      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityAudioInput, []);
-      uploadedToolsUtilityAudio = restoredUtilityAudioSource;
+    const restoreSingleManagedUpload = (idbItem, config, localSetter) => {
+      const restored = b64ToFile(idbItem);
+      if (isRemoteAssetItem(restored)) {
+        setManagedUploadRemoteItems(config, restored);
+        if (localSetter) localSetter(null);
+      } else {
+        setManagedUploadRemoteItems(config, []);
+        if (localSetter) localSetter(restored);
+      }
+      const inputEl = config.inputId ? qs(config.inputId) : null;
+      if (inputEl && inputEl._uploadConfig) refreshManagedUploadUi(inputEl);
+    };
+    restoreSingleManagedUpload(results.utilityImage, MANAGED_UPLOADS.toolsUtilityImageInput, (v) => { uploadedToolsUtilityImage = v; });
+    restoreSingleManagedUpload(results.utilityAudio, MANAGED_UPLOADS.toolsUtilityAudioInput, (v) => { uploadedToolsUtilityAudio = v; });
+    restoreSingleManagedUpload(results.utilityVideo, MANAGED_UPLOADS.toolsUtilityVideoInput, (v) => { uploadedToolsUtilityVideo = v; });
+    const managedData = results.managedUploads;
+    if (managedData && typeof managedData === 'object') {
+      const managedSetters = {
+        maskInput: (v) => { uploadedMaskFile = v; },
+        videoInput: (v) => { uploadedVideoFile = v; },
+        videoImageInput: (v) => { uploadedVideoImageFile = v; },
+        referenceImagesInput: (v) => { uploadedReferenceImages = v; },
+        videoEndImageInput: (v) => { uploadedEndImageFile = v; },
+        audioInput: (v) => { uploadedAudioFile = v; },
+        kling3StartImageInput: (v) => { uploadedKling3StartImage = v; },
+        kling3EndImageInput: (v) => { uploadedKling3EndImage = v; },
+        kling3VideoInput: (v) => { uploadedKling3Video = v; },
+        kling3RefImagesInput: (v) => { uploadedKling3RefImages = v; },
+        seedance2ReferenceImagesInput: (v) => { uploadedSeedanceReferenceImages = v; },
+        seedance2ReferenceVideosInput: (v) => { uploadedSeedanceReferenceVideos = v; },
+        seedance2ReferenceAudiosInput: (v) => { uploadedSeedanceReferenceAudios = v; },
+        threeDFrontInput: (v) => { uploaded3dFrontFile = v; },
+        threeDBackInput: (v) => { uploaded3dBackFile = v; },
+        threeDLeftInput: (v) => { uploaded3dLeftFile = v; },
+        threeDRightInput: (v) => { uploaded3dRightFile = v; },
+        threeDMeshyTextureImageInput: (v) => { uploaded3dMeshyTextureImageFile = v; },
+        threeDTopologyFileInput: (v) => { uploaded3dTopologyFile = v; },
+        threeDRetextureModelInput: (v) => { uploaded3dRetextureModelFile = v; },
+        threeDRetextureStyleImageInput: (v) => { uploaded3dRetextureStyleImageFile = v; },
+      };
+      for (const [key, setter] of Object.entries(managedSetters)) {
+        const savedArr = managedData[key];
+        if (!Array.isArray(savedArr) || savedArr.length === 0) continue;
+        const config = MANAGED_UPLOADS[key];
+        if (!config) continue;
+        const restored = savedArr.map(b64ToFile).filter(Boolean);
+        const localFiles = restored.filter((f) => !isRemoteAssetItem(f));
+        const remoteFiles = restored.filter((f) => isRemoteAssetItem(f));
+        if (remoteFiles.length > 0) setManagedUploadRemoteItems(config, config.multiple ? remoteFiles : remoteFiles[0]);
+        if (config.multiple) {
+          setter(localFiles);
+        } else {
+          setter(localFiles[0] || null);
+        }
+        const inputEl = config.inputId ? qs(config.inputId) : null;
+        if (inputEl && inputEl._uploadConfig) refreshManagedUploadUi(inputEl);
+      }
     }
-    const utilityAudioInput = qs('toolsUtilityAudioInput');
-    if (utilityAudioInput && utilityAudioInput._uploadConfig) refreshManagedUploadUi(utilityAudioInput);
-    const restoredUtilityVideoSource = b64ToFile(utilityVideoItem);
-    if (isRemoteAssetItem(restoredUtilityVideoSource)) {
-      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityVideoInput, restoredUtilityVideoSource);
-      uploadedToolsUtilityVideo = null;
-    } else {
-      setManagedUploadRemoteItems(MANAGED_UPLOADS.toolsUtilityVideoInput, []);
-      uploadedToolsUtilityVideo = restoredUtilityVideoSource;
-    }
-    const utilityVideoInput = qs('toolsUtilityVideoInput');
-    if (utilityVideoInput && utilityVideoInput._uploadConfig) refreshManagedUploadUi(utilityVideoInput);
   } catch (e) { console.warn('IDB restore failed', e); }
 }
 
@@ -12574,6 +13027,141 @@ const PERSISTED_CHECKBOXES = [
   'toolsHeygenTranslateAudioOnly', 'toolsHeygenEnableDynamicDuration',
 ];
 
+const APP_STATE_CONTROL_SELECTOR = 'select[id], textarea[id], input[id]';
+const APP_STATE_TRANSIENT_CONTROL_IDS = new Set([
+  'historySearchInput',
+  'fhgSearchInput',
+  'pmAddInput',
+  'wizFontSearch',
+]);
+let _appPersistenceHooked = false;
+let _pendingAppControlApplyFrame = null;
+let _appPersistenceMutationObserver = null;
+
+function isPersistableAppControl(el) {
+  if (!el || !el.id || APP_STATE_TRANSIENT_CONTROL_IDS.has(el.id)) return false;
+  const tag = String(el.tagName || '').toUpperCase();
+  if (tag !== 'SELECT' && tag !== 'TEXTAREA' && tag !== 'INPUT') return false;
+  if (tag === 'INPUT') {
+    const type = String(el.type || 'text').toLowerCase();
+    if (type === 'file' || type === 'button' || type === 'submit' || type === 'reset' || type === 'image') return false;
+  }
+  return true;
+}
+
+function readPersistableControlValue(el) {
+  if (!isPersistableAppControl(el)) return undefined;
+  const tag = String(el.tagName || '').toUpperCase();
+  const type = String(el.type || '').toLowerCase();
+  if (type === 'checkbox' || type === 'radio') return !!el.checked;
+  if (tag === 'SELECT' && el.multiple) return Array.from(el.selectedOptions || []).map((option) => option.value);
+  if (tag === 'SELECT' && el.options && el.options.length === 0 && !el.value) return undefined;
+  return el.value;
+}
+
+function dispatchPersistedControlEvents(el, changed, includeInput = false) {
+  if (!changed) return;
+  if (includeInput) el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function writePersistableControlValue(el, value) {
+  if (!isPersistableAppControl(el)) return true;
+  const tag = String(el.tagName || '').toUpperCase();
+  const type = String(el.type || '').toLowerCase();
+  if (type === 'checkbox' || type === 'radio') {
+    const nextChecked = !!value;
+    const changed = el.checked !== nextChecked;
+    el.checked = nextChecked;
+    dispatchPersistedControlEvents(el, changed, false);
+    return true;
+  }
+  if (tag === 'SELECT') {
+    if (el.options && el.options.length === 0) return false;
+    if (el.multiple && Array.isArray(value)) {
+      const selected = new Set(value.map((entry) => String(entry)));
+      let changed = false;
+      Array.from(el.options || []).forEach((option) => {
+        const nextSelected = selected.has(option.value);
+        if (option.selected !== nextSelected) changed = true;
+        option.selected = nextSelected;
+      });
+      dispatchPersistedControlEvents(el, changed, false);
+      return true;
+    }
+    const nextValue = value == null ? '' : String(value);
+    const hasOption = !el.options || el.options.length === 0 || Array.from(el.options).some((option) => option.value === nextValue);
+    if (!hasOption && nextValue !== '') return true;
+    const changed = el.value !== nextValue;
+    el.value = nextValue;
+    dispatchPersistedControlEvents(el, changed, false);
+    return true;
+  }
+  const nextValue = value == null ? '' : String(value);
+  const changed = el.value !== nextValue;
+  el.value = nextValue;
+  dispatchPersistedControlEvents(el, changed, true);
+  return true;
+}
+
+function mergeLegacyControlState(state) {
+  const controls = state && state.controls && typeof state.controls === 'object' ? { ...state.controls } : {};
+  const buckets = [state && state.selects, state && state.inputs, state && state.checkboxes];
+  buckets.forEach((bucket) => {
+    if (!bucket || typeof bucket !== 'object') return;
+    Object.entries(bucket).forEach(([id, value]) => {
+      if (controls[id] === undefined) controls[id] = value;
+    });
+  });
+  return controls;
+}
+
+function capturePersistedControls(state, previousState) {
+  const controls = previousState && previousState.controls && typeof previousState.controls === 'object'
+    ? { ...previousState.controls }
+    : {};
+  document.querySelectorAll(APP_STATE_CONTROL_SELECTOR).forEach((el) => {
+    const value = readPersistableControlValue(el);
+    if (value !== undefined) {
+      controls[el.id] = value;
+      if (window._pendingAppControlState && typeof window._pendingAppControlState === 'object') {
+        window._pendingAppControlState[el.id] = value;
+      }
+    }
+  });
+  state.controls = controls;
+}
+
+function applyPendingPersistedControls() {
+  const pending = window._pendingAppControlState;
+  if (!pending || typeof pending !== 'object') return;
+  Object.keys(pending).forEach((id) => {
+    const el = qs(id);
+    if (!el) return;
+    writePersistableControlValue(el, pending[id]);
+  });
+}
+
+function queueApplyPendingPersistedControls() {
+  if (_pendingAppControlApplyFrame !== null) return;
+  const apply = () => {
+    _pendingAppControlApplyFrame = null;
+    applyPendingPersistedControls();
+  };
+  if (window.requestAnimationFrame) _pendingAppControlApplyFrame = window.requestAnimationFrame(apply);
+  else _pendingAppControlApplyFrame = window.setTimeout(apply, 0);
+}
+
+function restorePersistedControls(state) {
+  window._pendingAppControlState = mergeLegacyControlState(state);
+  applyPendingPersistedControls();
+}
+
+function handlePersistableControlEvent(event) {
+  const el = event && event.target;
+  if (!isPersistableAppControl(el)) return;
+  if (typeof saveAppState === 'function') saveAppState();
+}
 function applyCardStudioToolsDefaultsToState(state, options = {}) {
   const force = !!(options && options.force);
   const currentVersion = Number(state && state.version) || 0;
@@ -12591,33 +13179,83 @@ function applyCardStudioToolsDefaultsToState(state, options = {}) {
   return true;
 }
 
+let _appStateRestoring = true;
 function saveAppState() {
+  if (_appStateRestoring) return;
+  // Only clear the saved-state shadow when the user is actually in the video
+  // section, the live DOM holds the real value, AND no async video restore is
+  // still pending. While _pendingVideoRestore is set the videoModel <select>
+  // exists but has no options yet, so we must keep the shadow intact.
+  if (window._savedVideoState && currentMode === 'video' && !window._pendingVideoRestore) {
+    window._savedVideoState = null;
+  }
   try {
+    // Read previously saved state so we can preserve values for DOM elements
+    // that don't exist in the current mode (e.g. video controls when in text mode).
+    let _prevSaved = null;
+    try { _prevSaved = JSON.parse(localStorage.getItem(APP_STATE_KEY) || 'null'); } catch (_) {}
     const state = {
       version: APP_STATE_VERSION,
       mode: currentMode,
       videoTab: currentVideoTab,
       kling3Family: currentKling3Family,
       kling3Tab: currentKling3Tab,
+      ltx23Family: currentLtx23Family,
+      seedance2Family: currentSeedance2Family,
+      kling3LastTabByFamily: Object.assign({}, kling3LastTabByFamily),
       toolsTool: currentToolsTool,
+      videoEngine: window._currentVideoEngine || (_prevSaved && _prevSaved.videoEngine) || '',
       selects: {},
       inputs: {},
       checkboxes: {},
     };
     for (const id of PERSISTED_SELECTS) {
       const el = qs(id);
-      if (el) state.selects[id] = el.value;
+      if (el && !(el.options && el.options.length === 0 && !el.value)) { state.selects[id] = el.value; }
+      else if (_prevSaved && _prevSaved.selects && _prevSaved.selects[id] !== undefined) {
+        state.selects[id] = _prevSaved.selects[id];
+      }
     }
     for (const id of PERSISTED_INPUTS) {
       const el = qs(id);
-      if (el) state.inputs[id] = el.value;
+      if (el) { state.inputs[id] = el.value; }
+      else if (_prevSaved && _prevSaved.inputs && _prevSaved.inputs[id] !== undefined) {
+        state.inputs[id] = _prevSaved.inputs[id];
+      }
     }
     for (const id of PERSISTED_CHECKBOXES) {
       const el = qs(id);
-      if (el) state.checkboxes[id] = !!el.checked;
+      if (el) { state.checkboxes[id] = !!el.checked; }
+      else if (_prevSaved && _prevSaved.checkboxes && _prevSaved.checkboxes[id] !== undefined) {
+        state.checkboxes[id] = _prevSaved.checkboxes[id];
+      }
     }
-    const klingModelId = getSelectedKling3ModelId();
-    if (klingModelId) state.selects.kling3Model = klingModelId;
+    capturePersistedControls(state, _prevSaved);
+    // Only save kling3Model if the current video selection actually is a Kling model.
+    const currentVideoModelEl = qs('videoModel');
+    const currentVideoModelId = currentVideoModelEl ? String(currentVideoModelEl.value || '').trim() : '';
+    const isCurrentKling = currentVideoModelId && isKling3VideoModelId(currentVideoModelId);
+    if (isCurrentKling) {
+      state.selects.kling3Model = currentVideoModelId;
+    } else {
+      // Strip any stale kling3Model so it doesn't auto-restore Kling later.
+      delete state.selects.kling3Model;
+    }
+    if (Object.keys(kling3SelectedModelByTab).length) state.kling3SelectedModelByTab = Object.assign({}, kling3SelectedModelByTab);
+    if (Object.keys(ltx23SelectedModelByFamily).length) state.ltx23SelectedModelByFamily = Object.assign({}, ltx23SelectedModelByFamily);
+    if (Object.keys(seedance2SelectedModelByFamily).length) state.seedance2SelectedModelByFamily = Object.assign({}, seedance2SelectedModelByFamily);
+    // Capture latest dynamic video option values for the current model before persisting.
+    try { captureVideoOptionsToMemory(); } catch (_) {}
+    if (videoOptionsByModel && Object.keys(videoOptionsByModel).length) {
+      try { state.videoOptionsByModel = JSON.parse(JSON.stringify(videoOptionsByModel)); } catch (_) {}
+    }
+    if (currentPreview && typeof currentPreview === 'object') {
+      try { state.currentPreview = JSON.parse(JSON.stringify(currentPreview)); } catch (_) {}
+    }
+    if (galleryItems.length > 0) {
+      try { state.galleryItems = JSON.parse(JSON.stringify(galleryItems)); } catch (_) {}
+      state.galleryIndex = galleryIndex;
+    }
     // Wizard-specific state
     if (typeof _wizStep === 'number') state.wizStep = _wizStep;
     // Characteristics
@@ -12632,6 +13270,11 @@ function saveAppState() {
     const samAudioSpans = getToolsSamAudioSpanState();
     if (samAudioSpans.length) {
       state.samAudioSpans = samAudioSpans;
+    }
+    if (Array.isArray(kling3MultiPrompts) && kling3MultiPrompts.length) {
+      state.kling3MultiPrompts = kling3MultiPrompts
+        .map((item) => ({ id: item && item.id ? item.id : Date.now(), prompt: String(item && item.prompt || ''), duration: String(item && item.duration || '5') }))
+        .filter((item) => item.prompt || item.duration);
     }
     localStorage.setItem(APP_STATE_KEY, JSON.stringify(state));
     wizIdbSaveImages();
@@ -12684,29 +13327,66 @@ function restoreAppState() {
       }
     }
 
+    restorePersistedControls(state);
+
     // Restore mode and tabs
     if (state.videoTab) currentVideoTab = state.videoTab;
     if (state.kling3Family) currentKling3Family = state.kling3Family;
     if (state.kling3Tab) currentKling3Tab = state.kling3Tab;
     if (state.toolsTool && TOOLS_TOOL_IDS.has(state.toolsTool)) currentToolsTool = state.toolsTool;
-    if (!state.videoTab && state.kling3Tab) {
+    if (state.ltx23Family) currentLtx23Family = state.ltx23Family;
+    if (state.seedance2Family) currentSeedance2Family = state.seedance2Family;
+    if (state.videoEngine) window._currentVideoEngine = state.videoEngine;
+    if (state.kling3LastTabByFamily && typeof state.kling3LastTabByFamily === 'object') {
+      Object.assign(kling3LastTabByFamily, state.kling3LastTabByFamily);
+    }
+    if (state.kling3SelectedModelByTab && typeof state.kling3SelectedModelByTab === 'object') {
+      Object.assign(kling3SelectedModelByTab, state.kling3SelectedModelByTab);
+    }
+    if (state.ltx23SelectedModelByFamily && typeof state.ltx23SelectedModelByFamily === 'object') {
+      Object.assign(ltx23SelectedModelByFamily, state.ltx23SelectedModelByFamily);
+    }
+    if (state.videoOptionsByModel && typeof state.videoOptionsByModel === 'object') {
+      videoOptionsByModel = state.videoOptionsByModel;
+    }
+    if (state.seedance2SelectedModelByFamily && typeof state.seedance2SelectedModelByFamily === 'object') {
+      Object.assign(seedance2SelectedModelByFamily, state.seedance2SelectedModelByFamily);
+    }
+    if (Array.isArray(state.kling3MultiPrompts)) {
+      kling3MultiPrompts = state.kling3MultiPrompts.map((item, index) => ({
+        id: item && item.id ? item.id : Date.now() + index,
+        prompt: String(item && item.prompt || ''),
+        duration: String(item && item.duration || '5'),
+      }));
+      if (typeof renderKling3MultiPrompts === 'function') renderKling3MultiPrompts();
+    }
+    window._restoredPreviewState = {
+      preview: state.currentPreview || null,
+      gallery: state.galleryItems || null,
+      galleryIndex: typeof state.galleryIndex === 'number' ? state.galleryIndex : 0,
+    };
+    // Determine the effective video model ID from saved state (videoModel is the source of truth).
+    const savedVideoModelId = String(
+      (state.selects && state.selects.videoModel !== undefined ? state.selects.videoModel : null)
+      || (state.controls && state.controls.videoModel !== undefined ? state.controls.videoModel : '')
+      || ''
+    ).trim();
+    // Only sync Kling state if the saved video model is actually a Kling model.
+    if (savedVideoModelId && isKling3VideoModelId(savedVideoModelId)) {
+      const klingTab = getKling3TabForModelId(savedVideoModelId);
+      if (klingTab) {
+        currentKling3Tab = klingTab;
+        currentKling3Family = getKling3FamilyForTab(klingTab);
+        kling3SelectedModelByTab[klingTab] = savedVideoModelId;
+        if (!state.videoTab) {
+          const mappedVideoTab = getVideoTabForKling3Tab(klingTab);
+          if (mappedVideoTab) currentVideoTab = mappedVideoTab;
+        }
+      }
+    } else if (!state.videoTab && state.kling3Tab) {
+      // Only fall back to Kling tab if we have no videoTab AND no concrete saved video model.
       const mappedVideoTab = getVideoTabForKling3Tab(state.kling3Tab);
       if (mappedVideoTab) currentVideoTab = mappedVideoTab;
-    }
-    const restoredKlingModelId = state.selects
-      ? String(state.selects.videoModel || state.selects.kling3Model || '')
-      : '';
-    const restoredKlingTab = getKling3TabForModelId(restoredKlingModelId);
-    if (restoredKlingTab) {
-      currentKling3Tab = restoredKlingTab;
-      currentKling3Family = getKling3FamilyForTab(restoredKlingTab);
-      kling3SelectedModelByTab[restoredKlingTab] = restoredKlingModelId;
-      if (!state.videoTab) {
-        const mappedVideoTab = getVideoTabForKling3Tab(restoredKlingTab);
-        if (mappedVideoTab) currentVideoTab = mappedVideoTab;
-      }
-    } else if (state.selects && state.selects.kling3Model && currentKling3Tab) {
-      kling3SelectedModelByTab[currentKling3Tab] = state.selects.kling3Model;
     }
 
     // Stash wizard state for initToolsControls to pick up
@@ -12726,18 +13406,23 @@ function restoreAppState() {
 }
 
 function hookPersistence() {
-  for (const id of PERSISTED_SELECTS) {
-    const el = qs(id);
-    if (el) el.addEventListener('change', saveAppState);
+  if (_appPersistenceHooked) return;
+  _appPersistenceHooked = true;
+  document.addEventListener('input', handlePersistableControlEvent, true);
+  document.addEventListener('change', handlePersistableControlEvent, true);
+  if (window.MutationObserver && document.body) {
+    _appPersistenceMutationObserver = new MutationObserver((mutations) => {
+      if (!window._pendingAppControlState) return;
+      for (const mutation of mutations) {
+        if (mutation.addedNodes && mutation.addedNodes.length) {
+          queueApplyPendingPersistedControls();
+          return;
+        }
+      }
+    });
+    _appPersistenceMutationObserver.observe(document.body, { childList: true, subtree: true });
   }
-  for (const id of PERSISTED_INPUTS) {
-    const el = qs(id);
-    if (el) el.addEventListener('input', saveAppState);
-  }
-  for (const id of PERSISTED_CHECKBOXES) {
-    const el = qs(id);
-    if (el) el.addEventListener('change', saveAppState);
-  }
+  queueApplyPendingPersistedControls();
 }
 
 function refreshLocalizedDynamicUi() {
@@ -13008,7 +13693,7 @@ function setAccountStorageScope(userId, options = {}) {
       console.warn('Failed to refresh font presets for storage scope', error);
     });
   }
-  if (options.loadHistory) replaceHistoryFromAccount(loadStoredArray('nano_history'));
+  if (options.loadHistory) replaceHistoryFromAccount(loadStoredArray('nano_history'), { persist: false });
   if (options.loadTasks !== false) replaceTasksFromScopedStorage();
 }
 
@@ -13129,6 +13814,7 @@ window.NanoApp = {
   getScopedHistoryCacheMeta,
   hydrateHistoryFromScopedCache,
   persistHistoryCache,
+  getAccountHistorySyncPayload,
   markDesignPresetSyncClean: markInspoLocalStateClean,
   mergePersistedHistoryItems,
   getAccountSummarySnapshot,
@@ -13154,11 +13840,39 @@ requestAnimationFrame(autoResizePromptInput);
 const savedMode = restoreAppState();
 hookPersistence();
 taskTicker = setInterval(renderTasks, 1500);
+
+// Capture the saved video state BEFORE switchMode runs (which may overwrite some values).
+const _savedVideoState = (function readSavedVideoState() {
+  try {
+    const raw = localStorage.getItem(APP_STATE_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (!s || typeof s !== 'object') return null;
+    return {
+      videoModelId: String(
+        (s.selects && s.selects.videoModel !== undefined ? s.selects.videoModel : null)
+        || (s.controls && s.controls.videoModel !== undefined ? s.controls.videoModel : '')
+        || ''
+      ).trim(),
+      videoTab: String(s.videoTab || '').trim(),
+      ltx23Family: String(s.ltx23Family || '').trim(),
+      seedance2Family: String(s.seedance2Family || '').trim(),
+      kling3Tab: String(s.kling3Tab || '').trim(),
+      videoEngine: String(s.videoEngine || '').trim(),
+    };
+  } catch (_) { return null; }
+})();
+// Pending video restore: armed whenever we have ANY saved video state, even
+// when the user reloaded outside the video section. Cleared the first time
+// applyVideoRestore() actually applies it (e.g. when the user navigates back).
+window._pendingVideoRestore = !!(_savedVideoState && (_savedVideoState.videoModelId || _savedVideoState.videoTab));
+window._savedVideoState = _savedVideoState;
+
 if (savedMode) {
   switchMode(savedMode);
-  // Restore sub-tabs after mode switch
+  // For non-video tab restoration, sync the tab buttons but DEFER actual model selection.
   if (savedMode === 'video' && currentVideoTab) {
-    switchVideoTab(currentVideoTab);
+    setActiveVideoTabButtonState(currentVideoTab);
   }
   if (savedMode === '3d') {
     update3dUiVisibility();
@@ -13166,6 +13880,126 @@ if (savedMode) {
 } else {
   switchMode('text');
 }
+
+// Restore preview & gallery from persisted state
+if (window._restoredPreviewState) {
+  const rps = window._restoredPreviewState;
+  if (Array.isArray(rps.gallery) && rps.gallery.length > 0) {
+    galleryItems = rps.gallery;
+    galleryIndex = typeof rps.galleryIndex === 'number' ? Math.min(rps.galleryIndex, galleryItems.length - 1) : 0;
+    displayResult(galleryItems[galleryIndex]);
+  } else if (rps.preview) {
+    displayResult(rps.preview);
+  }
+  delete window._restoredPreviewState;
+}
+
+// Atomic video restore: runs once after video models have loaded.
+// Idempotent — can be re-invoked to reassert the saved selection if anything
+// downstream tries to overwrite it (e.g. ensureKling3EmbeddedSection setup).
+async function applyVideoRestore(_savedOverride) {
+  // Idempotent boot-time and on-demand video restore.
+  const savedFromGlobal = window._savedVideoState || _savedVideoState;
+  const saved = _savedOverride || savedFromGlobal;
+  if (!saved) { delete window._pendingVideoRestore; return; }
+  try {
+    // Make sure the video controls exist (videoModel select is dynamic).
+    try { ensureVideoControls(); } catch (_) {}
+    await loadVideoModels();
+    // Restore the 3-tier engine selection.
+    if (saved.videoEngine && VIDEO_ENGINE_MAP.has(saved.videoEngine)) {
+      window._currentVideoEngine = saved.videoEngine;
+    } else if (saved.videoModelId) {
+      var derivedEngine = getEngineForModelId(saved.videoModelId);
+      if (derivedEngine) window._currentVideoEngine = derivedEngine;
+    }
+    const modelId = saved.videoModelId;
+    if (modelId && VIDEO_MODEL_MAP.has(modelId)) {
+      if (isLtx23VideoModelId(modelId)) {
+        selectLtx23Model(modelId, { skipSave: true });
+      } else if (isSeedance2VideoModelId(modelId)) {
+        selectSeedance2Model(modelId, { skipSave: true });
+      } else if (isKling3VideoModelId(modelId)) {
+        const klingTab = getKling3TabForModelId(modelId);
+        if (klingTab) {
+          switchKling3Tab(klingTab, { skipSave: true, skipVideoSelectionSync: false, preferredModelId: modelId });
+        }
+      } else {
+        const meta = VIDEO_MODEL_MAP.get(modelId);
+        const targetTab = meta && meta.kind ? getVideoTabForModelKind(meta.kind) : '';
+        if (targetTab && targetTab !== currentVideoTab) {
+          currentVideoTab = targetTab;
+          setActiveVideoTabButtonState(targetTab);
+        }
+        refreshVideoModelDropdown(modelId);
+        const sel = qs('videoModel');
+        if (sel && sel.value !== modelId) sel.value = modelId;
+      }
+    } else if (saved.videoTab) {
+      currentVideoTab = saved.videoTab;
+      setActiveVideoTabButtonState(saved.videoTab);
+      refreshVideoModelDropdown();
+    }
+    updateVideoUiVisibility();
+    renderVideoOptionsUI();
+    try { refreshVideo3TierUi(); } catch (_) {}
+    // Final assertion: if the dropdown still doesn't match the saved id, force it.
+    if (modelId) {
+      const sel2 = qs('videoModel');
+      if (sel2 && sel2.value !== modelId && Array.from(sel2.options).some((o) => o.value === modelId)) {
+        sel2.value = modelId;
+        updateVideoUiVisibility();
+        renderVideoOptionsUI();
+      }
+    }
+  } catch (e) {
+    console.warn('applyVideoRestore failed', e);
+  } finally {
+    delete window._pendingVideoRestore;
+  }
+}
+
+// Watchdog: if anything mutates the video model away from the saved id within
+// the first second after boot, reassert it. This catches late async paths
+// (e.g. account-bridge hydration or i18n re-renders) that could clobber state.
+window.applyVideoRestore = applyVideoRestore;
+function scheduleVideoRestoreWatchdog() {
+  if (!window._savedVideoState || !window._savedVideoState.videoModelId) return;
+  // The watchdog only operates while a saved selection exists. It is one-shot;
+  // a fresh user selection clears window._savedVideoState so the watchdog stops.
+  const targetId = window._savedVideoState.videoModelId;
+  let attempts = 0;
+  const maxAttempts = 8; // ~1.2s
+  const tick = () => {
+    if (currentMode !== 'video') return; // not in video right now; abort silently
+    if (!window._savedVideoState || window._savedVideoState.videoModelId !== targetId) return;
+    attempts++;
+    const sel = qs('videoModel');
+    if (sel && sel.value && sel.value !== targetId && Array.from(sel.options).some((o) => o.value === targetId)) {
+      applyVideoRestore({ videoModelId: targetId, videoTab: window._savedVideoState.videoTab, videoEngine: window._savedVideoState.videoEngine });
+    }
+    if (attempts < maxAttempts) setTimeout(tick, 150);
+  };
+  setTimeout(tick, 150);
+}
+window.scheduleVideoRestoreWatchdog = scheduleVideoRestoreWatchdog;
+
+// Release the boot-time saveAppState guard once async restoration is complete.
+(function releaseRestoreGuardWhenReady() {
+  const release = () => {
+    _appStateRestoring = false;
+    try { saveAppState(); } catch (_) {}
+    try { scheduleVideoRestoreWatchdog(); } catch (_) {}
+  };
+  // Only run applyVideoRestore at boot when the user reloaded INSIDE the
+  // video section. When they reloaded elsewhere, restore is deferred until
+  // they navigate back to video (handled by ensureVideoControls hook).
+  if (savedMode === 'video') {
+    applyVideoRestore().then(() => setTimeout(release, 50)).catch(() => setTimeout(release, 50));
+  } else {
+    setTimeout(release, 50);
+  }
+})();
 
 // Apply i18n LAST — after all selects and models are populated
 hookNewsLocaleUpdates();
